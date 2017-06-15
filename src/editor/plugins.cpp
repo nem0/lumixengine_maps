@@ -1,7 +1,10 @@
+#include "editor/platform_interface.h"
 #include "editor/render_interface.h"
 #include "editor/studio_app.h"
 #include "editor/utils.h"
 #include "editor/world_editor.h"
+#include "engine/math_utils.h"
+#include "engine/path_utils.h"
 #include "imgui/imgui.h"
 #include "stb/stb_image.h"
 #include <Windows.h>
@@ -78,6 +81,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		action->func.bind<MapsPlugin, &MapsPlugin::toggleOpen>(this);
 		action->is_selected.bind<MapsPlugin, &MapsPlugin::isOpen>(this);
 		app.addWindowAction(action);
+		copyString(m_out_path, "out.raw");
 	}
 
 
@@ -241,11 +245,17 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 	};
 
 
+	void browse()
+	{
+		PlatformInterface::getSaveFilename(m_out_path, lengthOf(m_out_path), "Raw Image\0*.raw\0", "raw");
+	}
+
+
 	void save()
 	{
 		if (!m_height_map.pixels) return;
 		if (!m_satallite_map.pixels) return;
-
+		
 		Array<u16> raw(m_app.getWorldEditor()->getAllocator());
 		raw.resize(m_height_map.w * m_height_map.h);
 		const RGBA* in = (const RGBA*)m_height_map.pixels;
@@ -269,9 +279,18 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			raw[i] = u16((double(p - min) / diff) * 0xffff);
 		}
 
-		FILE* fp = fopen("terrains/piestany/hm.raw", "wb");
-		fwrite(&raw[0], raw.size() * 2, 1, fp);
-		fclose(fp);
+		FILE* fp = fopen(m_out_path, "wb");
+		if (fp)
+		{
+			fwrite(&raw[0], raw.size() * 2, 1, fp);
+			fclose(fp);
+		}
+
+		RenderInterface* ri = m_app.getWorldEditor()->getRenderInterface();
+		PathUtils::FileInfo file_info(m_out_path);
+		StaticString<MAX_PATH_LENGTH> tga_path(file_info.m_dir, "/", file_info.m_basename, ".tga");
+		ri->saveTexture(m_app.getWorldEditor()->getEngine(), tga_path, m_satallite_map.pixels, m_satallite_map.w, m_satallite_map.h);
+
 	}
 
 
@@ -290,6 +309,24 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		{
 			ImGui::SameLine();
 			if (ImGui::Button("Save")) save();
+		}
+		ImGui::SameLine();
+		int zoom = m_zoom;
+		if (ImGui::SliderInt("Zoom", &zoom, 0, 18))
+		{
+			if (zoom > m_zoom)
+			{
+				m_x <<= zoom - m_zoom;
+				m_y <<= zoom - m_zoom;
+				m_zoom = zoom;
+			}
+			else
+			{
+				m_x >>= m_zoom - zoom;
+				m_y >>= m_zoom - zoom;
+				m_zoom = zoom;
+			}
+			download();
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("+"))
@@ -321,24 +358,45 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			++m_x;
 			download();
 		}
+
+		ImGui::LabelText("Output", m_out_path);
+		ImGui::SameLine();
+		if (ImGui::Button("...")) browse();
 		static bool show_hm = false;
 		ImGui::Checkbox("Show HeightMap", &show_hm);
-		ImVec2 cursor_screen_pos = ImGui::GetCursorScreenPos();
+		ImVec2 cursor_pos = ImGui::GetCursorScreenPos();
 		if (m_satallite_map.texture && !show_hm) ImGui::Image(m_satallite_map.texture, ImVec2(512, 512));
 		if (m_height_map.texture && show_hm) ImGui::Image(m_height_map.texture, ImVec2(512, 512));
 
 		if (ImGui::IsMouseClicked(0) && ImGui::IsItemHovered())
 		{
-			ImVec2 mouse_pos = ImGui::GetMousePos();
-			++m_zoom;
-			m_x <<= 1;
-			m_y <<= 1;
-			if (mouse_pos.x - cursor_screen_pos.x > 256) ++m_x;
-			if (mouse_pos.y - cursor_screen_pos.y > 256) ++m_y;
-			m_is_download_deferred = true;
+			m_mouse_down_pos  = ImGui::GetMousePos();
+		}
+		if (ImGui::IsMouseReleased(0) && ImGui::IsItemHovered())
+		{
+			ImVec2 up_pos = ImGui::GetMousePos();
+			float diff = Math::maximum(Math::abs(up_pos.x - m_mouse_down_pos.x), Math::abs(up_pos.y - m_mouse_down_pos.y));
+			int new_zoom = m_zoom;
+			while (diff * 2 < 256)
+			{
+				++new_zoom;
+				diff *= 2;
+			}
+			if (new_zoom != m_zoom)
+			{
+				int x = m_x << (new_zoom - m_zoom);
+				int y = m_y << (new_zoom - m_zoom);
+				float left = Math::minimum(up_pos.x, m_mouse_down_pos.x) - cursor_pos.x;
+				float up = Math::minimum(up_pos.y, m_mouse_down_pos.y) - cursor_pos.y;
+				m_x = x + int((left / 512.0f) * (1 << (new_zoom - m_zoom)));
+				m_y = y + int((up / 512.0f) * (1 << (new_zoom - m_zoom)));
+				m_zoom = new_zoom;
+				m_is_download_deferred = true;
+			}
 		}
 
 		ImGui::Text("Uses https://aws.amazon.com/public-datasets/terrain/");
+		ImGui::Text("http://s3.amazonaws.com/elevation-tiles-prod/terrarium/%d/%d/%d.png", m_zoom, m_x, m_y);
 
 		ImGui::EndDock();
 	}
@@ -354,6 +412,8 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 	int m_zoom = 0;
 	int m_x = 0;
 	int m_y = 0;
+	char m_out_path[MAX_PATH_LENGTH];
+	ImVec2 m_mouse_down_pos;
 };
 
 
