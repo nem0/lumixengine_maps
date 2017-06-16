@@ -3,15 +3,18 @@
 #include "editor/studio_app.h"
 #include "editor/utils.h"
 #include "editor/world_editor.h"
+#include "engine/log.h"
 #include "engine/math_utils.h"
+#include "engine/mt/task.h"
 #include "engine/path_utils.h"
 #include "imgui/imgui.h"
 #include "stb/stb_image.h"
+#include <WinSock2.h>
 #include <Windows.h>
-#include <WinInet.h>
 #include <cmath>
 #include <cstdlib>
 #pragma comment(lib, "wininet.lib")
+#pragma comment(lib, "Ws2_32.lib")
 
 
 using namespace Lumix;
@@ -81,6 +84,11 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		, m_satellite_map(app.getWorldEditor()->getAllocator())
 		, m_height_map(app.getWorldEditor()->getAllocator())
 	{
+		WORD sockVer;
+		WSADATA wsaData;
+		sockVer = 2 | (2 << 8);
+		if (WSAStartup(sockVer, &wsaData) != 0) g_log_error.log("Maps") << "Failed to init winsock.";
+
 		Action* action = LUMIX_NEW(app.getWorldEditor()->getAllocator(), Action)("Maps", "maps");
 		action->func.bind<MapsPlugin, &MapsPlugin::toggleOpen>(this);
 		action->is_selected.bind<MapsPlugin, &MapsPlugin::isOpen>(this);
@@ -89,91 +97,110 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 	}
 
 
+	~MapsPlugin()
+	{
+		WSACleanup();
+		clear();
+	}
+
+
 	void toggleOpen() { m_open = !m_open; }
 	bool isOpen() const { return m_open; }
 
 
-	bool downloadImage(const char* url, u8* out, int stride_bytes)
+	static bool writeRawString(SOCKET socket, const char* str)
 	{
-		char url_path[2048];
-		URL_COMPONENTSA urlc;
-		memset(&urlc, 0, sizeof(urlc));
-		urlc.dwStructSize = sizeof(urlc);
-		urlc.lpszUrlPath = url_path;
-		urlc.dwUrlPathLength = sizeof(url_path);
-
-		if (!InternetCrackUrlA(url, 0, ICU_DECODE, &urlc)) return false;
-
-		HINTERNET inet = InternetOpen("LumixEngine", // user agent
-			INTERNET_OPEN_TYPE_PRECONFIG,
-			NULL, // lpszProxyName
-			NULL, // lpszProxyBypass
-			0	 // dwFlags
-		);
-		if (!inet) return false;
-
-		DWORD dwFlags = 0;
-		dwFlags |= INTERNET_FLAG_PRAGMA_NOCACHE | INTERNET_FLAG_RELOAD;
-		dwFlags |= INTERNET_FLAG_SECURE;
-
-		HINTERNET conn_raw = InternetOpenUrlA(inet,
-			url,
-			NULL, // lpszHeaders
-			-1,   // dwHeadersLength
-			dwFlags,
-			NULL // dwContext
-		);
-		if (!conn_raw && GetLastError() != ERROR_IO_PENDING) return false;
-
-		char buf[1024 * 10];
-		DWORD read;
-		auto err2 = GetLastError();
-		BOOL res = TRUE;
-		Array<u8> data(m_app.getWorldEditor()->getAllocator());
-		data.reserve(256*256);
-		do
-		{
-			res = InternetReadFile(conn_raw, buf, sizeof(buf), &read) && res;
-			if (read > 0)
-			{
-				data.resize(data.size() + read);
-				copyMemory(&data[data.size() - read], buf, read);
-			}
-		} while (read > 0);
-		if (res == FALSE) return false;
-
-		int channels, w, h;
-		stbi_uc* pixels = stbi_load_from_memory(&data[0], data.size(), &w, &h, &channels, 4);
-		if (!pixels) return false;
-
-		ASSERT(w == 256);
-		ASSERT(h == 256);
-		for (int i = 0; i < h; ++i)
-		{
-			copyMemory(&out[i * stride_bytes], &pixels[i * w * 4], sizeof(u32) * w);
-		}
-
-		stbi_image_free(pixels);
-		return true;
+		int len = stringLength(str);
+		int send = ::send(socket, str, len, 0);
+		return send == len;
 	}
 
 
-	/*bool downloadImage(const char* name, const char* url, ImageData* out)
+	struct MyTask : public MT::Task
 	{
-		downloadImage(url, &data);
-		int channels;
-		out->pixels = stbi_load_from_memory(&data[0], data.size(), &out->w, &out->h, &channels, 4);
-		if (!out->pixels) return false;
-		out->texture = m_app.getWorldEditor()->getRenderInterface()->createTexture(name, out->pixels, out->w, out->h);
-		if (!out->texture)
+		MyTask(IAllocator& _allocator)
+			: Task(_allocator)
+			, allocator(_allocator)
 		{
-			stbi_image_free(out->pixels);
-			return false;
 		}
 
+		int task() override
+		{
+			SOCKET socket = ::socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+			if (socket == INVALID_SOCKET) return false;
 
-		return true;
-	}*/
+			SOCKADDR_IN sin;
+
+			setMemory(&sin, 0, sizeof(sin));
+			sin.sin_family = AF_INET;
+			sin.sin_port = htons(80);
+			hostent* hostname = gethostbyname(host);
+			if (!hostname) return false;
+			const char* ip = inet_ntoa(**(in_addr**)hostname->h_addr_list);
+			sin.sin_addr.s_addr = ip ? ::inet_addr(ip) : INADDR_ANY;
+
+			if (connect(socket, (LPSOCKADDR)&sin, sizeof(sin)) != 0)
+			{
+				closesocket(socket);
+				return false;
+			}
+
+			//u_long nonblocking = 1;
+			//ioctlsocket(socket, FIONBIO, &nonblocking);
+
+			writeRawString(socket, "GET ");
+			writeRawString(socket, path);
+			writeRawString(socket, " HTTP/1.1\r\nHost: ");
+			writeRawString(socket, host);
+			writeRawString(socket, "\r\nConnection: close\r\n\r\n");
+
+			Array<u8> data(allocator);
+			data.reserve(256 * 256);
+			u8 buf[1024];
+			while (int r = ::recv(socket, (char*)buf, sizeof(buf), 0))
+			{
+				if (r > 0)
+				{
+					data.resize(data.size() + r);
+					copyMemory(&data[data.size() - r], buf, r);
+				}
+			}
+
+			closesocket(socket);
+			int header_size = 0;
+			for (int i = 0; i < data.size() - 4; ++i)
+			{
+				if (data[i] == '\r' && data[i + 1] == '\n' && data[i + 2] == '\r' && data[i + 3] == '\n')
+				{
+					header_size = i + 4;
+					break;
+				}
+			}
+
+			int channels, w, h;
+			stbi_uc* pixels =
+				stbi_load_from_memory(&data[header_size], data.size() - header_size, &w, &h, &channels, 4);
+			if (!pixels) return -1;
+
+			ASSERT(w == 256);
+			ASSERT(h == 256);
+			for (int i = 0; i < h; ++i)
+			{
+				copyMemory(&out[i * stride_bytes], &pixels[i * w * 4], sizeof(u32) * w);
+			}
+
+			stbi_image_free(pixels);
+			return 0;
+		}
+
+		StaticString<MAX_PATH_LENGTH> host;
+		StaticString<1024> path;
+		u8* out;
+		int stride_bytes;
+		IAllocator& allocator;
+	};
+
+
 
 	void clear()
 	{
@@ -196,7 +223,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 	{
 		int shift = scale - 1;
 		sprintf(url,
-			"http://s3.amazonaws.com/elevation-tiles-prod/terrarium/%d/%d/%d.png",
+			"/elevation-tiles-prod/terrarium/%d/%d/%d.png",
 			m_zoom,
 			(m_x << shift) + x,
 			(m_y << shift) + y);
@@ -210,7 +237,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		double lat = googleTileLat((m_y << shift) + y + 0.5f, m_zoom);
 
 		sprintf(url,
-			"https://maps.googleapis.com/maps/api/"
+			"/maps/api/"
 			"staticmap?center=%f,%f&zoom=%d&size=256x256&maptype=satellite&&key="
 			"AIzaSyDVNwegaW4klzqUfqZ038zorEgao8TtNHs",
 			lat,
@@ -235,6 +262,8 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		};
 		pixels.resize(MAP_SIZE * MAP_SIZE);
 
+		IAllocator& allocator = m_app.getWorldEditor()->getEngine().getAllocator();
+		MyTask* tasks[(1 << SCALE) * (1 << SCALE)];
 		char url[1024];
 		bool res = true;
 		for (int j = 0; j < (1 << SCALE); ++j)
@@ -242,10 +271,22 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			for (int i = 0; i < (1 << SCALE); ++i)
 			{
 				getSatellitePath(url, i, j, (1 << SCALE) - 1);
-				res = downloadImage(url, (u8*)&pixels[i * 256 + j * 256 * MAP_SIZE], MAP_SIZE * sizeof(u32)) && res;
+				MyTask* task = LUMIX_NEW(allocator, MyTask)(allocator);
+				task->host = "maps.googleapis.com";
+				task->path = url;
+				task->out = (u8*)&pixels[i * 256 + j * 256 * MAP_SIZE];
+				task->stride_bytes = MAP_SIZE * sizeof(u32);
+				task->create("download_image");
+				tasks[i + j * (1 << SCALE)] = task;
 			}
 		}
-			
+		
+		for (MyTask* task : tasks)
+		{
+			task->destroy();
+			LUMIX_DELETE(allocator, task);
+		}
+
 		m_satellite_map.w = MAP_SIZE;
 		m_satellite_map.h = MAP_SIZE;
 		m_satellite_map.texture = m_app.getWorldEditor()->getRenderInterface()->createTexture("maps", &pixels[0], MAP_SIZE, MAP_SIZE);
@@ -264,8 +305,20 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 				for (int i = 0; i < (1 << SCALE); ++i)
 				{
 					getHeightmapPath(url, i, j, (1 << SCALE) - 1);
-					res = downloadImage(url, (u8*)&pixels[i * 256 + j * 256 * MAP_SIZE], MAP_SIZE * sizeof(u32)) && res;
+					MyTask* task = LUMIX_NEW(allocator, MyTask)(allocator);
+					task->host = "s3.amazonaws.com";
+					task->path = url;
+					task->out = (u8*)&pixels[i * 256 + j * 256 * MAP_SIZE];
+					task->stride_bytes = MAP_SIZE * sizeof(u32);
+					task->create("download_hm");
+					tasks[i + j * (1 << SCALE)] = task;
 				}
+			}
+
+			for (MyTask* task : tasks)
+			{
+				task->destroy();
+				LUMIX_DELETE(allocator, task);
 			}
 
 			m_height_map.w = MAP_SIZE;
@@ -280,12 +333,6 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		
 		if (!res) clear();
 		return res;
-	}
-
-
-	~MapsPlugin()
-	{
-		clear();
 	}
 
 
@@ -454,11 +501,19 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		ImGui::Text("Uses https://aws.amazon.com/public-datasets/terrain/");
 		ImGui::Text("http://s3.amazonaws.com/elevation-tiles-prod/terrarium/%d/%d/%d.png", m_zoom, m_x, m_y);
 
+		ImGui::Text("Downloading: %fs", m_stats.downloading);
+		ImGui::Text("Parsing: %fs", m_stats.parsing);
+
 		ImGui::EndDock();
 	}
 
 
 	const char* getName() const override { return "maps"; }
+
+	struct {
+		float downloading = 0;
+		float parsing = 0;
+	} m_stats;
 
 	StudioApp& m_app;
 	ImageData m_satellite_map;
