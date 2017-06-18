@@ -545,6 +545,10 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			}
 		}
 
+		float lat = float(tiley2lat(float(m_y + (1 << (m_size - 1))), m_zoom));
+		float resolution = 256 * (1 << m_size) * 156543.03f * Math::abs(cos(lat)) / (1 << zoom);
+
+		ImGui::LabelText("Resolution", "%fkm", resolution/1000);
 		ImGui::Text("Uses https://aws.amazon.com/public-datasets/terrain/");
 		ImGui::Text("http://s3.amazonaws.com/elevation-tiles-prod/terrarium/%d/%d/%d.png", m_zoom, m_x, m_y);
 
