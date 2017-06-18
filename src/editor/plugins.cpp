@@ -68,13 +68,7 @@ double googleTileLong(float x, int z)
 
 struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 {
-	enum
-	{
-		SCALE = 2,
-		MAP_SIZE = 256 * (1 << SCALE)
-	};
-
-
+	enum { TILE_SIZE = 256 };
 	struct MyTask;
 
 
@@ -85,7 +79,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			, mutex(false)
 			, tasks(allocator) 
 		{
-			pixels.resize(MAP_SIZE * MAP_SIZE);
+			pixels.resize(TILE_SIZE * TILE_SIZE * 4);
 		}
 
 		Array<MyTask*> tasks;
@@ -124,9 +118,6 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 				return false;
 			}
 
-			//u_long nonblocking = 1;
-			//ioctlsocket(socket, FIONBIO, &nonblocking);
-
 			writeRawString(socket, "GET ");
 			writeRawString(socket, path);
 			writeRawString(socket, " HTTP/1.1\r\nHost: ");
@@ -138,6 +129,11 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			u8 buf[1024];
 			while (int r = ::recv(socket, (char*)buf, sizeof(buf), 0))
 			{
+				if (canceled)
+				{
+					closesocket(socket);
+					return -1;
+				}
 				if (r > 0)
 				{
 					data.resize(data.size() + r);
@@ -163,6 +159,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 
 			ASSERT(w == 256);
 			ASSERT(h == 256);
+			if (canceled) return -1;
 			mutex->lock();
 			for (int i = 0; i < h; ++i)
 			{
@@ -179,6 +176,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		u8* out;
 		int stride_bytes;
 		IAllocator& allocator;
+		bool canceled = false;
 	};
 
 
@@ -203,20 +201,29 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 
 	~MapsPlugin()
 	{
+		finishAllTasks();
+		WSACleanup();
+		clear();
+	}
+
+
+	void finishAllTasks()
+	{
 		IAllocator& allocator = m_app.getWorldEditor()->getEngine().getAllocator();
 		for (MyTask* task : m_satellite_map.tasks)
 		{
+			task->canceled = true;
 			task->destroy();
 			LUMIX_DELETE(allocator, task);
 		}
 		for (MyTask* task : m_height_map.tasks)
 		{
+			task->canceled = true;
 			task->destroy();
 			LUMIX_DELETE(allocator, task);
 		}
-
-		WSACleanup();
-		clear();
+		m_height_map.tasks.clear();
+		m_satellite_map.tasks.clear();
 	}
 
 
@@ -251,20 +258,20 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 
 	void getHeightmapPath(char* url, int x, int y, int scale)
 	{
-		int shift = scale - 1;
+		int size = 1 << m_zoom;
 		sprintf(url,
 			"/elevation-tiles-prod/terrarium/%d/%d/%d.png",
 			m_zoom,
-			(m_x << shift) + x,
-			(m_y << shift) + y);
+			(m_x + x) % size,
+			(m_y + y) % size);
 	}
 
 
 	void getSatellitePath(char* url, int x, int y, int scale)
 	{
-		int shift = scale - 1;
-		double lng = googleTileLong((m_x << shift) + x + 0.5f, m_zoom);
-		double lat = googleTileLat((m_y << shift) + y + 0.5f, m_zoom);
+		int size = 1 << m_zoom;
+		double lng = googleTileLong((m_x + x) % size + 0.5f, m_zoom);
+		double lat = googleTileLat((m_y + y) % size + 0.5f, m_zoom);
 
 		sprintf(url,
 			"/maps/api/"
@@ -278,24 +285,25 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 
 	void download()
 	{
+		finishAllTasks();
 		m_is_download_deferred = false;
 
 		m_x = m_x % (1 << m_zoom);
 		m_y = m_y % (1 << m_zoom);
 
-
 		IAllocator& allocator = m_app.getWorldEditor()->getEngine().getAllocator();
+		int map_size = TILE_SIZE * (1 << m_size);
 		char url[1024];
-		for (int j = 0; j < (1 << SCALE); ++j)
+		for (int j = 0; j < (1 << m_size); ++j)
 		{
-			for (int i = 0; i < (1 << SCALE); ++i)
+			for (int i = 0; i < (1 << m_size); ++i)
 			{
-				getSatellitePath(url, i, j, (1 << SCALE) - 1);
+				getSatellitePath(url, i, j, (1 << m_size) - 1);
 				MyTask* task = LUMIX_NEW(allocator, MyTask)(allocator);
 				task->host = "maps.googleapis.com";
 				task->path = url;
-				task->out = (u8*)&m_satellite_map.pixels[i * 256 + j * 256 * MAP_SIZE];
-				task->stride_bytes = MAP_SIZE * sizeof(u32);
+				task->out = (u8*)&m_satellite_map.pixels[i * TILE_SIZE + j * 256 * map_size];
+				task->stride_bytes = map_size * sizeof(u32);
 				task->mutex = &m_satellite_map.mutex;
 				task->create("download_image");
 				m_satellite_map.tasks.push(task);
@@ -303,16 +311,16 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		}
 		
 
-		for (int j = 0; j < (1 << SCALE); ++j)
+		for (int j = 0; j < (1 << m_size); ++j)
 		{
-			for (int i = 0; i < (1 << SCALE); ++i)
+			for (int i = 0; i < (1 << m_size); ++i)
 			{
-				getHeightmapPath(url, i, j, (1 << SCALE) - 1);
+				getHeightmapPath(url, i, j, (1 << m_size) - 1);
 				MyTask* task = LUMIX_NEW(allocator, MyTask)(allocator);
 				task->host = "s3.amazonaws.com";
 				task->path = url;
-				task->out = (u8*)&m_height_map.pixels[i * 256 + j * 256 * MAP_SIZE];
-				task->stride_bytes = MAP_SIZE * sizeof(u32);
+				task->out = (u8*)&m_height_map.pixels[i * 256 + j * 256 * map_size];
+				task->stride_bytes = map_size * sizeof(u32);
 				task->mutex = &m_height_map.mutex;
 				task->create("download_hm");
 				m_height_map.tasks.push(task);
@@ -345,7 +353,8 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		if (m_satellite_map.pixels.empty()) return;
 		
 		Array<u16> raw(m_app.getWorldEditor()->getAllocator());
-		raw.resize(MAP_SIZE * MAP_SIZE);
+		int map_size = TILE_SIZE * (1 << m_size);
+		raw.resize(map_size * map_size);
 		const RGBA* in = (const RGBA*)&m_height_map.pixels[0];
 
 		u32 min = 0xffffFFFF;
@@ -377,7 +386,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		RenderInterface* ri = m_app.getWorldEditor()->getRenderInterface();
 		PathUtils::FileInfo file_info(m_out_path);
 		StaticString<MAX_PATH_LENGTH> tga_path(file_info.m_dir, "/", file_info.m_basename, ".tga");
-		ri->saveTexture(m_app.getWorldEditor()->getEngine(), tga_path, &m_satellite_map.pixels[0], MAP_SIZE, MAP_SIZE);
+		ri->saveTexture(m_app.getWorldEditor()->getEngine(), tga_path, &m_satellite_map.pixels[0], map_size, map_size);
 	}
 
 
@@ -402,9 +411,20 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		RenderInterface* ri = m_app.getWorldEditor()->getRenderInterface();
 		if (data->texture) ri->destroyTexture(data->texture);
 
+		int map_size = TILE_SIZE * (1 << m_size);
 		data->mutex.lock();
-		data->texture = ri->createTexture("maps", &data->pixels[0], MAP_SIZE, MAP_SIZE);
+		data->texture = ri->createTexture("maps", &data->pixels[0], map_size, map_size);
 		data->mutex.unlock();
+	}
+
+
+	void resize()
+	{
+		finishAllTasks();
+		int map_size = TILE_SIZE * (1 << m_size);
+		m_satellite_map.pixels.resize(map_size * map_size);
+		m_height_map.pixels.resize(map_size * map_size);
+		download();
 	}
 
 
@@ -445,7 +465,6 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			}
 			download();
 		}
-		ImGui::SameLine();
 		if (ImGui::Button("+"))
 		{
 			++m_zoom;
@@ -475,6 +494,20 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			++m_x;
 			download();
 		}
+		ImGui::SameLine();
+		if (ImGui::Button("up"))
+		{
+			--m_y;
+			if (m_y < 0) m_y = 0;
+			download();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("down"))
+		{
+			++m_y;
+			download();
+		}
+		if (ImGui::Combo("Size", &m_size, "1x1\0" "2x2\0" "4x4\0" "8x8\0")) resize();
 
 		ImGui::LabelText("Output", m_out_path);
 		ImGui::SameLine();
@@ -529,6 +562,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 	int m_zoom = 2;
 	int m_x = 0;
 	int m_y = 0;
+	int m_size = 1;
 	char m_out_path[MAX_PATH_LENGTH];
 	ImVec2 m_mouse_down_pos;
 };
