@@ -25,7 +25,7 @@ namespace
 {
 
 
-constexpr float M_PI = 3.14159265f;
+constexpr double M_PI = 3.14159265f;
 
 
 int long2tilex(double lon, int z)
@@ -38,19 +38,19 @@ int lat2tiley(double lat, int z)
 	return (int)(floor((1.0 - log(tan(lat * M_PI / 180.0) + 1.0 / cos(lat * M_PI / 180.0)) / M_PI) / 2.0 * pow(2.0, z)));
 }
 
-double tilex2long(float x, int z)
+double tilex2long(double x, int z)
 {
 	return x / pow(2.0, z) * 360.0 - 180;
 }
 
-double tiley2lat(float y, int z)
+double tiley2lat(double y, int z)
 {
 	double n = M_PI - 2.0 * M_PI * y / pow(2.0, z);
 	return 180.0 / M_PI * atan(0.5 * (exp(n) - exp(-n)));
 }
 
 
-double googleTileLat(float y, int z)
+double googleTileLat(double y, int z)
 {
 	double lat = tiley2lat(y, z);
 	double nlat = tiley2lat(y + 1, z);
@@ -58,7 +58,7 @@ double googleTileLat(float y, int z)
 }
 
 
-double googleTileLong(float x, int z)
+double googleTileLong(double x, int z)
 {
 	double lng = tilex2long(x, z);
 	double nlng = tilex2long(x + 1, z);
@@ -449,7 +449,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		}
 		ImGui::SameLine();
 		int zoom = m_zoom;
-		if (ImGui::SliderInt("Zoom", &zoom, 2, 18))
+		if (ImGui::SliderInt("Zoom", &zoom, m_size, 18))
 		{
 			if (zoom > m_zoom)
 			{
@@ -467,7 +467,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		}
 		if (ImGui::Button("+"))
 		{
-			++m_zoom;
+			m_zoom = Math::clamp(m_zoom + 1, m_size, 18);
 			m_x <<= 1;
 			m_y <<= 1;
 			download();
@@ -475,10 +475,9 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		ImGui::SameLine();
 		if (ImGui::Button("-"))
 		{
-			--m_zoom;
+			m_zoom = Math::clamp(m_zoom - 1, m_size, 18);
 			m_x >>= 1;
 			m_y >>= 1;
-			if (m_zoom < 0) m_zoom = 0;
 			download();
 		}
 		ImGui::SameLine();
@@ -525,7 +524,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		if (ImGui::IsMouseReleased(0) && ImGui::IsItemHovered())
 		{
 			ImVec2 up_pos = ImGui::GetMousePos();
-			float diff = Math::maximum(Math::abs(up_pos.x - m_mouse_down_pos.x), Math::abs(up_pos.y - m_mouse_down_pos.y));
+			double diff = Math::maximum(Math::abs(up_pos.x - m_mouse_down_pos.x), Math::abs(up_pos.y - m_mouse_down_pos.y));
 			int new_zoom = m_zoom;
 			while (diff * 2 < 256)
 			{
@@ -534,21 +533,23 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			}
 			if (new_zoom != m_zoom)
 			{
-				int x = m_x << (new_zoom - m_zoom);
-				int y = m_y << (new_zoom - m_zoom);
-				float left = Math::minimum(up_pos.x, m_mouse_down_pos.x) - cursor_pos.x;
-				float up = Math::minimum(up_pos.y, m_mouse_down_pos.y) - cursor_pos.y;
-				m_x = x + int((left / 512.0f) * (1 << (new_zoom - m_zoom)));
-				m_y = y + int((up / 512.0f) * (1 << (new_zoom - m_zoom)));
+				double x = m_x / double(1 << m_zoom);
+				double y = m_y / double(1 << m_zoom);
+				double left = Math::minimum(up_pos.x, m_mouse_down_pos.x) - cursor_pos.x;
+				double up = Math::minimum(up_pos.y, m_mouse_down_pos.y) - cursor_pos.y;
+				x += (left / 512.0f) / (1 << (m_zoom - m_size));
+				y += (up / 512.0f) / (1 << (m_zoom - m_size));
+				m_x = int(x * (1 << new_zoom));
+				m_y = int(y * (1 << new_zoom));
 				m_zoom = new_zoom;
 				m_is_download_deferred = true;
 			}
 		}
 
-		float lat = float(tiley2lat(float(m_y + (1 << (m_size - 1))), m_zoom));
-		float resolution = 256 * (1 << m_size) * 156543.03f * Math::abs(cos(lat)) / (1 << zoom);
+		double lat = double(tiley2lat(double(m_y + (1 << (m_size - 1))), m_zoom));
+		double resolution = 256 * (1 << m_size) * 156543.03 * cos(Math::degreesToRadians(lat)) / (1 << zoom);
 
-		ImGui::LabelText("Resolution", "%fkm", resolution/1000);
+		ImGui::Text("Width: %fkm", resolution/1000);
 		ImGui::Text("Uses https://aws.amazon.com/public-datasets/terrain/");
 		ImGui::Text("http://s3.amazonaws.com/elevation-tiles-prod/terrarium/%d/%d/%d.png", m_zoom, m_x, m_y);
 
@@ -563,7 +564,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 	ImageData m_height_map;
 	bool m_open = false;
 	bool m_is_download_deferred = true;
-	int m_zoom = 2;
+	int m_zoom = 1;
 	int m_x = 0;
 	int m_y = 0;
 	int m_size = 1;
