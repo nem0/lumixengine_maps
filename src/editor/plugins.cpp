@@ -3,10 +3,11 @@
 #include "editor/studio_app.h"
 #include "editor/utils.h"
 #include "editor/world_editor.h"
+#include "engine/fs/os_file.h"
 #include "engine/log.h"
 #include "engine/math_utils.h"
-#include "engine/mt/task.h"
 #include "engine/mt/sync.h"
+#include "engine/mt/task.h"
 #include "engine/path_utils.h"
 #include "imgui/imgui.h"
 #include "stb/stb_image.h"
@@ -14,7 +15,6 @@
 #include <Windows.h>
 #include <cmath>
 #include <cstdlib>
-#pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "Ws2_32.lib")
 
 
@@ -25,150 +25,159 @@ namespace
 {
 
 
-constexpr double M_PI = 3.14159265f;
-
-
-int long2tilex(double lon, int z)
-{
-	return (int)(floor((lon + 180.0) / 360.0 * pow(2.0, z)));
-}
-
-int lat2tiley(double lat, int z)
-{
-	return (int)(floor((1.0 - log(tan(lat * M_PI / 180.0) + 1.0 / cos(lat * M_PI / 180.0)) / M_PI) / 2.0 * pow(2.0, z)));
-}
-
 double tilex2long(double x, int z)
 {
 	return x / pow(2.0, z) * 360.0 - 180;
 }
 
+
 double tiley2lat(double y, int z)
 {
-	double n = M_PI - 2.0 * M_PI * y / pow(2.0, z);
-	return 180.0 / M_PI * atan(0.5 * (exp(n) - exp(-n)));
+	double n = Math::PI - 2.0 * Math::PI * y / pow(2.0, z);
+	return 180.0 / Math::PI * atan(0.5 * (exp(n) - exp(-n)));
 }
 
 
-double googleTileLat(double y, int z)
-{
-	double lat = tiley2lat(y, z);
-	double nlat = tiley2lat(y + 1, z);
-	return lat; // (lat + nlat) * 0.5;
-}
-
-
-double googleTileLong(double x, int z)
-{
-	double lng = tilex2long(x, z);
-	double nlng = tilex2long(x + 1, z);
-	return lng; // (lng + nlng) * 0.5;
-}
+constexpr int TILE_SIZE = 256;
+constexpr int MAX_ZOOM = 18;
+constexpr float MAP_UI_SIZE = 512;
 
 
 struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 {
-	enum { TILE_SIZE = 256 };
-	struct MyTask;
+	struct MapsTask;
 
 
 	struct ImageData
 	{
-		ImageData(IAllocator& allocator) 
+		ImageData(int tiles_count, IAllocator& allocator) 
 			: pixels(allocator)
 			, mutex(false)
 			, tasks(allocator) 
 		{
-			pixels.resize(TILE_SIZE * TILE_SIZE * 4);
+			pixels.resize(TILE_SIZE * TILE_SIZE * tiles_count);
 		}
 
-		Array<MyTask*> tasks;
+		Array<MapsTask*> tasks;
 		MT::SpinMutex mutex;
 		ImTextureID texture = nullptr;
 		Array<u32> pixels;
 	};
 
 
-	struct MyTask : public MT::Task
+	struct MapsTask : public MT::Task
 	{
-		MyTask(IAllocator& _allocator)
+		MapsTask(IAllocator& _allocator)
 			: Task(_allocator)
 			, allocator(_allocator)
 		{
 		}
 
-		int task() override
+
+		static int getHTTPHeaderLength(const Array<u8>& data)
 		{
-			SOCKET socket = ::socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
-			if (socket == INVALID_SOCKET) return false;
-
-			SOCKADDR_IN sin;
-
-			setMemory(&sin, 0, sizeof(sin));
-			sin.sin_family = AF_INET;
-			sin.sin_port = htons(80);
-			hostent* hostname = gethostbyname(host);
-			if (!hostname) return false;
-			const char* ip = inet_ntoa(**(in_addr**)hostname->h_addr_list);
-			sin.sin_addr.s_addr = ip ? ::inet_addr(ip) : INADDR_ANY;
-
-			if (connect(socket, (LPSOCKADDR)&sin, sizeof(sin)) != 0)
+			for (int i = 0; i < data.size() - 4; ++i)
 			{
-				closesocket(socket);
-				return false;
+				if (data[i] == '\r' && data[i + 1] == '\n' && data[i + 2] == '\r' && data[i + 3] == '\n')
+				{
+					return i + 4;
+				}
 			}
+			return 0;
+		}
 
+
+		static void sendHTTPHeader(SOCKET socket, const char* host, const char* path)
+		{
 			writeRawString(socket, "GET ");
 			writeRawString(socket, path);
 			writeRawString(socket, " HTTP/1.1\r\nHost: ");
 			writeRawString(socket, host);
 			writeRawString(socket, "\r\nConnection: close\r\n\r\n");
+		}
 
-			Array<u8> data(allocator);
-			data.reserve(256 * 256);
+
+		bool readAll(SOCKET socket, Array<u8>* data) const
+		{
+			data->reserve(256 * 256);
 			u8 buf[1024];
 			while (int r = ::recv(socket, (char*)buf, sizeof(buf), 0))
 			{
 				if (canceled)
 				{
 					closesocket(socket);
-					return -1;
+					return false;
 				}
 				if (r > 0)
 				{
-					data.resize(data.size() + r);
-					copyMemory(&data[data.size() - r], buf, r);
+					data->resize(data->size() + r);
+					copyMemory(&(*data)[data->size() - r], buf, r);
 				}
 			}
+			return true;
+		}
 
-			closesocket(socket);
-			int header_size = 0;
-			for (int i = 0; i < data.size() - 4; ++i)
+
+		SOCKET connect(const char* host)
+		{
+			SOCKET socket = ::socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+			if (socket == INVALID_SOCKET) return INVALID_SOCKET;
+
+			SOCKADDR_IN sin;
+			setMemory(&sin, 0, sizeof(sin));
+			sin.sin_family = AF_INET;
+			sin.sin_port = htons(80);
+			hostent* hostname = gethostbyname(host);
+			if (!hostname) return INVALID_SOCKET;
+
+			const char* ip = inet_ntoa(**(in_addr**)hostname->h_addr_list);
+			sin.sin_addr.s_addr = ip ? ::inet_addr(ip) : INADDR_ANY;
+
+			if (::connect(socket, (LPSOCKADDR)&sin, sizeof(sin)) != 0)
 			{
-				if (data[i] == '\r' && data[i + 1] == '\n' && data[i + 2] == '\r' && data[i + 3] == '\n')
-				{
-					header_size = i + 4;
-					break;
-				}
+				closesocket(socket);
+				return INVALID_SOCKET;
 			}
+			return socket;
+		}
+
+
+		bool parseImage(const Array<u8>& data) const
+		{
+			int header_size = getHTTPHeaderLength(data);
 
 			int channels, w, h;
-			stbi_uc* pixels =
-				stbi_load_from_memory(&data[header_size], data.size() - header_size, &w, &h, &channels, 4);
-			if (!pixels) return -1;
+			int image_size = data.size() - header_size;
+			stbi_uc* pixels = stbi_load_from_memory(&data[header_size], image_size, &w, &h, &channels, 4);
+			if (!pixels || canceled) return false;
 
-			ASSERT(w == 256);
-			ASSERT(h == 256);
-			if (canceled) return -1;
+			ASSERT(w == 256 && h == 256);
 			mutex->lock();
-			for (int i = 0; i < h; ++i)
+			int row_size = w * sizeof(u32);
+			for (int j = 0; j < h; ++j)
 			{
-				copyMemory(&out[i * stride_bytes], &pixels[i * w * 4], sizeof(u32) * w);
+				copyMemory(&out[j * stride_bytes], &pixels[j * row_size], row_size);
 			}
 			mutex->unlock();
 			stbi_image_free(pixels);
-			return 0;
+			return true;
 		}
+
+
+		int task() override
+		{
+			SOCKET socket = connect(host);
+			if (socket == INVALID_SOCKET) return -1;
+
+			sendHTTPHeader(socket, host, path);
+
+			Array<u8> data(allocator);
+			if(!readAll(socket, &data)) return -1;
+			closesocket(socket);
+			
+			return parseImage(data) ? 0 : -1;
+		}
+
 
 		MT::SpinMutex* mutex;
 		StaticString<MAX_PATH_LENGTH> host;
@@ -176,15 +185,15 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		u8* out;
 		int stride_bytes;
 		IAllocator& allocator;
-		bool canceled = false;
+		volatile bool canceled = false;
 	};
 
 
 	MapsPlugin(StudioApp& app)
 		: m_app(app)
 		, m_open(false)
-		, m_satellite_map(app.getWorldEditor()->getAllocator())
-		, m_height_map(app.getWorldEditor()->getAllocator())
+		, m_satellite_map(4, app.getWorldEditor()->getAllocator())
+		, m_height_map(4, app.getWorldEditor()->getAllocator())
 	{
 		WORD sockVer;
 		WSADATA wsaData;
@@ -195,7 +204,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		action->func.bind<MapsPlugin, &MapsPlugin::toggleOpen>(this);
 		action->is_selected.bind<MapsPlugin, &MapsPlugin::isOpen>(this);
 		app.addWindowAction(action);
-		copyString(m_out_path, "out.raw");
+		m_out_path[0] = '\0';
 	}
 
 
@@ -210,13 +219,13 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 	void finishAllTasks()
 	{
 		IAllocator& allocator = m_app.getWorldEditor()->getEngine().getAllocator();
-		for (MyTask* task : m_satellite_map.tasks)
+		for (MapsTask* task : m_satellite_map.tasks)
 		{
 			task->canceled = true;
 			task->destroy();
 			LUMIX_DELETE(allocator, task);
 		}
-		for (MyTask* task : m_height_map.tasks)
+		for (MapsTask* task : m_height_map.tasks)
 		{
 			task->canceled = true;
 			task->destroy();
@@ -229,6 +238,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 
 	void toggleOpen() { m_open = !m_open; }
 	bool isOpen() const { return m_open; }
+	const char* getName() const override { return "maps"; }
 
 
 	static bool writeRawString(SOCKET socket, const char* str)
@@ -270,8 +280,8 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 	void getSatellitePath(char* url, int x, int y, int scale)
 	{
 		int size = 1 << m_zoom;
-		double lng = googleTileLong((m_x + x) % size + 0.5f, m_zoom);
-		double lat = googleTileLat((m_y + y) % size + 0.5f, m_zoom);
+		double lng = tilex2long((m_x + x) % size + 0.5f, m_zoom);
+		double lat = tiley2lat((m_y + y) % size + 0.5f, m_zoom);
 
 		sprintf(url,
 			"/maps/api/"
@@ -288,8 +298,9 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		finishAllTasks();
 		m_is_download_deferred = false;
 
-		m_x = m_x % (1 << m_zoom);
-		m_y = m_y % (1 << m_zoom);
+		int world_size = 1 << m_zoom;
+		m_x = (m_x + world_size) % world_size;
+		m_y = (m_y + world_size) % world_size;
 
 		IAllocator& allocator = m_app.getWorldEditor()->getEngine().getAllocator();
 		int map_size = TILE_SIZE * (1 << m_size);
@@ -299,7 +310,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			for (int i = 0; i < (1 << m_size); ++i)
 			{
 				getSatellitePath(url, i, j, (1 << m_size) - 1);
-				MyTask* task = LUMIX_NEW(allocator, MyTask)(allocator);
+				MapsTask* task = LUMIX_NEW(allocator, MapsTask)(allocator);
 				task->host = "maps.googleapis.com";
 				task->path = url;
 				task->out = (u8*)&m_satellite_map.pixels[i * TILE_SIZE + j * 256 * map_size];
@@ -309,14 +320,13 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 				m_satellite_map.tasks.push(task);
 			}
 		}
-		
 
 		for (int j = 0; j < (1 << m_size); ++j)
 		{
 			for (int i = 0; i < (1 << m_size); ++i)
 			{
 				getHeightmapPath(url, i, j, (1 << m_size) - 1);
-				MyTask* task = LUMIX_NEW(allocator, MyTask)(allocator);
+				MapsTask* task = LUMIX_NEW(allocator, MapsTask)(allocator);
 				task->host = "s3.amazonaws.com";
 				task->path = url;
 				task->out = (u8*)&m_height_map.pixels[i * 256 + j * 256 * map_size];
@@ -329,21 +339,9 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 	}
 
 
-	union RGBA
+	bool browse()
 	{
-		struct {
-			u8 r;
-			u8 g;
-			u8 b;
-			u8 a;
-		};
-		u32 rgba;
-	};
-
-
-	void browse()
-	{
-		PlatformInterface::getSaveFilename(m_out_path, lengthOf(m_out_path), "Raw Image\0*.raw\0", "raw");
+		return PlatformInterface::getSaveFilename(m_out_path, lengthOf(m_out_path), "Raw Image\0*.raw\0", "raw");
 	}
 
 
@@ -351,7 +349,14 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 	{
 		if (m_height_map.pixels.empty()) return;
 		if (m_satellite_map.pixels.empty()) return;
-		
+		if (m_out_path[0] == '\0' && !browse()) return;
+
+		union RGBA
+		{
+			struct { u8 r, g, b, a; };
+			u32 rgba;
+		};
+
 		Array<u16> raw(m_app.getWorldEditor()->getAllocator());
 		int map_size = TILE_SIZE * (1 << m_size);
 		raw.resize(map_size * map_size);
@@ -376,17 +381,21 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			raw[i] = u16((double(p - min) / diff) * 0xffff);
 		}
 
-		FILE* fp = fopen(m_out_path, "wb");
-		if (fp)
+		WorldEditor& editor = *m_app.getWorldEditor();
+		IAllocator& allocator = editor.getAllocator();
+		FS::OsFile file;
+		if (!file.open(m_out_path, FS::Mode::CREATE_AND_WRITE, allocator))
 		{
-			fwrite(&raw[0], raw.size() * 2, 1, fp);
-			fclose(fp);
-		} 
+			g_log_error.log("Maps") << "Failed to save " << m_out_path;
+			return;
+		}
+		file.write(&raw[0], raw.size() * 2);
+		file.close();
 
-		RenderInterface* ri = m_app.getWorldEditor()->getRenderInterface();
+		RenderInterface* ri = editor.getRenderInterface();
 		PathUtils::FileInfo file_info(m_out_path);
 		StaticString<MAX_PATH_LENGTH> tga_path(file_info.m_dir, "/", file_info.m_basename, ".tga");
-		ri->saveTexture(m_app.getWorldEditor()->getEngine(), tga_path, &m_satellite_map.pixels[0], map_size, map_size);
+		ri->saveTexture(editor.getEngine(), tga_path, &m_satellite_map.pixels[0], map_size, map_size);
 	}
 
 
@@ -396,7 +405,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		bool any_finished = false;
 		for (int i = data->tasks.size() - 1; i >= 0; --i)
 		{
-			MyTask* task = data->tasks[i];
+			MapsTask* task = data->tasks[i];
 			if (task->isFinished())
 			{
 				any_finished = true;
@@ -428,6 +437,33 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 	}
 
 
+	void move(int dx, int dy)
+	{
+		m_x += dx;
+		m_y += dy;
+		download();
+	}
+
+
+	void zoom(int dz)
+	{
+		int new_zoom = Math::clamp(m_zoom + dz, m_size, MAX_ZOOM);
+		dz = new_zoom - m_zoom;
+		if (dz > 0)
+		{
+			m_x <<= dz;
+			m_y <<= dz;
+		}
+		else
+		{
+			m_x >>= -dz;
+			m_y >>= -dz;
+		}
+		m_zoom = new_zoom;
+		download();
+	}
+
+
 	void onWindowGUI() override
 	{
 		checkTasks(&m_satellite_map);
@@ -441,86 +477,39 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 
 		if (m_is_download_deferred) download();
 
-		if (ImGui::Button("Refresh")) download();
-		if (!m_satellite_map.pixels.empty())
-		{
-			ImGui::SameLine();
-			if (ImGui::Button("Save")) save();
-		}
-		ImGui::SameLine();
-		int zoom = m_zoom;
-		if (ImGui::SliderInt("Zoom", &zoom, m_size, 18))
-		{
-			if (zoom > m_zoom)
-			{
-				m_x <<= zoom - m_zoom;
-				m_y <<= zoom - m_zoom;
-				m_zoom = zoom;
-			}
-			else
-			{
-				m_x >>= m_zoom - zoom;
-				m_y >>= m_zoom - zoom;
-				m_zoom = zoom;
-			}
-			download();
-		}
-		if (ImGui::Button("+"))
-		{
-			m_zoom = Math::clamp(m_zoom + 1, m_size, 18);
-			m_x <<= 1;
-			m_y <<= 1;
-			download();
-		}
-		ImGui::SameLine();
-		if (ImGui::Button("-"))
-		{
-			m_zoom = Math::clamp(m_zoom - 1, m_size, 18);
-			m_x >>= 1;
-			m_y >>= 1;
-			download();
-		}
-		ImGui::SameLine();
-		if (ImGui::Button("<"))
-		{
-			--m_x;
-			if (m_x < 0) m_x = 0;
-			download();
-		}
-		ImGui::SameLine();
-		if (ImGui::Button(">"))
-		{
-			++m_x;
-			download();
-		}
-		ImGui::SameLine();
-		if (ImGui::Button("up"))
-		{
-			--m_y;
-			if (m_y < 0) m_y = 0;
-			download();
-		}
-		ImGui::SameLine();
-		if (ImGui::Button("down"))
-		{
-			++m_y;
-			download();
-		}
 		if (ImGui::Combo("Size", &m_size, "1x1\0" "2x2\0" "4x4\0" "8x8\0")) resize();
+
+		int current_zoom = m_zoom;
+		if (ImGui::SliderInt("Zoom", &current_zoom, m_size, MAX_ZOOM)) zoom(current_zoom - m_zoom);
 
 		ImGui::LabelText("Output", m_out_path);
 		ImGui::SameLine();
 		if (ImGui::Button("...")) browse();
+
+		if (!m_satellite_map.pixels.empty() && ImGui::Button("Save")) save();
+
+		ImGui::SameLine();
+		if (ImGui::Button("+")) zoom(1);
+		ImGui::SameLine();
+		if (ImGui::Button("-")) zoom(-1);
+		ImGui::SameLine();
+		if (ImGui::Button("<")) move(-1, 0);
+		ImGui::SameLine();
+		if (ImGui::Button(">")) move(1, 0);
+		ImGui::SameLine();
+		if (ImGui::Button("up")) move(0, -1);
+		ImGui::SameLine();
+		if (ImGui::Button("down")) move(0, 1);
+
+		ImGui::SameLine();
 		static bool show_hm = false;
 		ImGui::Checkbox("Show HeightMap", &show_hm);
-		ImVec2 cursor_pos = ImGui::GetCursorScreenPos();
-		if (m_satellite_map.texture && !show_hm) ImGui::Image(m_satellite_map.texture, ImVec2(512, 512));
-		if (m_height_map.texture && show_hm) ImGui::Image(m_height_map.texture, ImVec2(512, 512));
 
-		if (ImGui::IsMouseClicked(0) && ImGui::IsItemHovered())
-		{
-			m_mouse_down_pos  = ImGui::GetMousePos();
-		}
+		ImVec2 cursor_pos = ImGui::GetCursorScreenPos();
+		if (m_satellite_map.texture && !show_hm) ImGui::Image(m_satellite_map.texture, ImVec2(MAP_UI_SIZE, MAP_UI_SIZE));
+		if (m_height_map.texture && show_hm) ImGui::Image(m_height_map.texture, ImVec2(MAP_UI_SIZE, MAP_UI_SIZE));
+
+		if (ImGui::IsMouseClicked(0) && ImGui::IsItemHovered()) m_mouse_down_pos = ImGui::GetMousePos();
 		if (ImGui::IsMouseReleased(0) && ImGui::IsItemHovered())
 		{
 			ImVec2 up_pos = ImGui::GetMousePos();
@@ -537,8 +526,8 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 				double y = m_y / double(1 << m_zoom);
 				double left = Math::minimum(up_pos.x, m_mouse_down_pos.x) - cursor_pos.x;
 				double up = Math::minimum(up_pos.y, m_mouse_down_pos.y) - cursor_pos.y;
-				x += (left / 512.0f) / (1 << (m_zoom - m_size));
-				y += (up / 512.0f) / (1 << (m_zoom - m_size));
+				x += (left / MAP_UI_SIZE) / (1 << (m_zoom - m_size));
+				y += (up / MAP_UI_SIZE) / (1 << (m_zoom - m_size));
 				m_x = int(x * (1 << new_zoom));
 				m_y = int(y * (1 << new_zoom));
 				m_zoom = new_zoom;
@@ -547,17 +536,15 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		}
 
 		double lat = double(tiley2lat(double(m_y + (1 << (m_size - 1))), m_zoom));
-		double resolution = 256 * (1 << m_size) * 156543.03 * cos(Math::degreesToRadians(lat)) / (1 << zoom);
+		double width = 256 * (1 << m_size) * 156543.03 * cos(Math::degreesToRadians(lat)) / (1 << m_zoom);
 
-		ImGui::Text("Width: %fkm", resolution/1000);
+		ImGui::Text("Width: %fkm", width / 1000);
 		ImGui::Text("Uses https://aws.amazon.com/public-datasets/terrain/");
 		ImGui::Text("http://s3.amazonaws.com/elevation-tiles-prod/terrarium/%d/%d/%d.png", m_zoom, m_x, m_y);
 
 		ImGui::EndDock();
 	}
 
-
-	const char* getName() const override { return "maps"; }
 
 	StudioApp& m_app;
 	ImageData m_satellite_map;
@@ -583,5 +570,3 @@ LUMIX_STUDIO_ENTRY(lumixengine_maps)
 	auto* plugin = LUMIX_NEW(editor.getAllocator(), MapsPlugin)(app);
 	app.addPlugin(*plugin);
 }
-
-
