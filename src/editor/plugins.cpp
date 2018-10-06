@@ -43,7 +43,7 @@ constexpr int MAX_ZOOM = 18;
 constexpr float MAP_UI_SIZE = 512;
 
 
-struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
+struct MapsPlugin final : public StudioApp::GUIPlugin
 {
 	struct MapsTask;
 
@@ -192,15 +192,15 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 	MapsPlugin(StudioApp& app)
 		: m_app(app)
 		, m_open(false)
-		, m_satellite_map(4, app.getWorldEditor()->getAllocator())
-		, m_height_map(4, app.getWorldEditor()->getAllocator())
+		, m_satellite_map(4, app.getWorldEditor().getAllocator())
+		, m_height_map(4, app.getWorldEditor().getAllocator())
 	{
 		WORD sockVer;
 		WSADATA wsaData;
 		sockVer = 2 | (2 << 8);
 		if (WSAStartup(sockVer, &wsaData) != 0) g_log_error.log("Maps") << "Failed to init winsock.";
 
-		Action* action = LUMIX_NEW(app.getWorldEditor()->getAllocator(), Action)("Maps", "maps");
+		Action* action = LUMIX_NEW(app.getWorldEditor().getAllocator(), Action)("Maps", "maps", "maps");
 		action->func.bind<MapsPlugin, &MapsPlugin::toggleOpen>(this);
 		action->is_selected.bind<MapsPlugin, &MapsPlugin::isOpen>(this);
 		app.addWindowAction(action);
@@ -218,7 +218,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 
 	void finishAllTasks()
 	{
-		IAllocator& allocator = m_app.getWorldEditor()->getEngine().getAllocator();
+		IAllocator& allocator = m_app.getWorldEditor().getEngine().getAllocator();
 		for (MapsTask* task : m_satellite_map.tasks)
 		{
 			task->canceled = true;
@@ -253,12 +253,12 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 	{
 		if (m_satellite_map.texture)
 		{
-			m_app.getWorldEditor()->getRenderInterface()->destroyTexture(m_satellite_map.texture);
+			m_app.getWorldEditor().getRenderInterface()->destroyTexture(m_satellite_map.texture);
 			m_satellite_map.texture = nullptr;
 		}
 		if (m_height_map.texture)
 		{
-			m_app.getWorldEditor()->getRenderInterface()->destroyTexture(m_height_map.texture);
+			m_app.getWorldEditor().getRenderInterface()->destroyTexture(m_height_map.texture);
 			m_height_map.texture = nullptr;
 		}
 		m_satellite_map.pixels.clear();
@@ -280,16 +280,11 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 	void getSatellitePath(char* url, int x, int y, int scale)
 	{
 		int size = 1 << m_zoom;
-		double lng = tilex2long((m_x + x) % size + 0.5f, m_zoom);
-		double lat = tiley2lat((m_y + y) % size + 0.5f, m_zoom);
-
 		sprintf(url,
-			"/maps/api/"
-			"staticmap?center=%f,%f&zoom=%d&size=256x256&maptype=satellite&&key="
-			"AIzaSyDVNwegaW4klzqUfqZ038zorEgao8TtNHs",
-			lat,
-			lng,
-			m_zoom);
+			"/wmts/1.0.0/s2cloudless-2017_3857/default/g/%d/%d/%d.jpg",
+			m_zoom,
+			(m_y + y) % size,
+			(m_x + x) % size);
 	}
 
 
@@ -302,7 +297,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		m_x = (m_x + world_size) % world_size;
 		m_y = (m_y + world_size) % world_size;
 
-		IAllocator& allocator = m_app.getWorldEditor()->getEngine().getAllocator();
+		IAllocator& allocator = m_app.getWorldEditor().getEngine().getAllocator();
 		int map_size = TILE_SIZE * (1 << m_size);
 		char url[1024];
 		for (int j = 0; j < (1 << m_size); ++j)
@@ -311,7 +306,8 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			{
 				getSatellitePath(url, i, j, (1 << m_size) - 1);
 				MapsTask* task = LUMIX_NEW(allocator, MapsTask)(allocator);
-				task->host = "maps.googleapis.com";
+				// https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2017_3857/default/g/2/1/1.jpg
+				task->host = "tiles.maps.eox.at";
 				task->path = url;
 				task->out = (u8*)&m_satellite_map.pixels[i * TILE_SIZE + j * 256 * map_size];
 				task->stride_bytes = map_size * sizeof(u32);
@@ -357,7 +353,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			u32 rgba;
 		};
 
-		Array<u16> raw(m_app.getWorldEditor()->getAllocator());
+		Array<u16> raw(m_app.getWorldEditor().getAllocator());
 		int map_size = TILE_SIZE * (1 << m_size);
 		raw.resize(map_size * map_size);
 		const RGBA* in = (const RGBA*)&m_height_map.pixels[0];
@@ -381,10 +377,10 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 			raw[i] = u16((double(p - min) / diff) * 0xffff);
 		}
 
-		WorldEditor& editor = *m_app.getWorldEditor();
+		WorldEditor& editor = m_app.getWorldEditor();
 		IAllocator& allocator = editor.getAllocator();
 		FS::OsFile file;
-		if (!file.open(m_out_path, FS::Mode::CREATE_AND_WRITE, allocator))
+		if (!file.open(m_out_path, FS::Mode::CREATE_AND_WRITE))
 		{
 			g_log_error.log("Maps") << "Failed to save " << m_out_path;
 			return;
@@ -401,7 +397,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 
 	void checkTasks(ImageData* data) const
 	{
-		IAllocator& allocator = m_app.getWorldEditor()->getEngine().getAllocator();
+		IAllocator& allocator = m_app.getWorldEditor().getEngine().getAllocator();
 		bool any_finished = false;
 		for (int i = data->tasks.size() - 1; i >= 0; --i)
 		{
@@ -417,7 +413,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 
 		if (!any_finished) return;
 
-		RenderInterface* ri = m_app.getWorldEditor()->getRenderInterface();
+		RenderInterface* ri = m_app.getWorldEditor().getRenderInterface();
 		if (data->texture) ri->destroyTexture(data->texture);
 
 		int map_size = TILE_SIZE * (1 << m_size);
@@ -541,7 +537,7 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 		ImGui::Text("Width: %fkm", width / 1000);
 		ImGui::Text("Uses https://aws.amazon.com/public-datasets/terrain/");
 		ImGui::Text("http://s3.amazonaws.com/elevation-tiles-prod/terrarium/%d/%d/%d.png", m_zoom, m_x, m_y);
-
+		ImGui::Text("Sentinel-2 cloudless - https://s2maps.eu by EOX IT Services GmbH (Contains modified Copernicus Sentinel data 2016 & 2017)");
 		ImGui::EndDock();
 	}
 
@@ -565,8 +561,9 @@ struct MapsPlugin LUMIX_FINAL : public StudioApp::IPlugin
 
 LUMIX_STUDIO_ENTRY(lumixengine_maps)
 {
-	WorldEditor& editor = *app.getWorldEditor();
+	WorldEditor& editor = app.getWorldEditor();
 
 	auto* plugin = LUMIX_NEW(editor.getAllocator(), MapsPlugin)(app);
 	app.addPlugin(*plugin);
+	return nullptr;
 }
