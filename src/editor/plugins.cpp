@@ -52,7 +52,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	{
 		ImageData(int tiles_count, IAllocator& allocator) 
 			: pixels(allocator)
-			, mutex(false)
 			, tasks(allocator) 
 		{
 			pixels.resize(TILE_SIZE * TILE_SIZE * tiles_count);
@@ -103,6 +102,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			u8 buf[1024];
 			while (int r = ::recv(socket, (char*)buf, sizeof(buf), 0))
 			{
+				ASSERT(r != SOCKET_ERROR);
 				if (canceled)
 				{
 					closesocket(socket);
@@ -465,9 +465,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		checkTasks(&m_satellite_map);
 		checkTasks(&m_height_map);
 
-		if (!ImGui::BeginDock("Maps", &m_open))
+		if (!ImGui::Begin("Maps", &m_open))
 		{
-			ImGui::EndDock();
+			ImGui::End();
 			return;
 		}
 
@@ -538,7 +538,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		ImGui::Text("Uses https://aws.amazon.com/public-datasets/terrain/");
 		ImGui::Text("http://s3.amazonaws.com/elevation-tiles-prod/terrarium/%d/%d/%d.png", m_zoom, m_x, m_y);
 		ImGui::Text("Sentinel-2 cloudless - https://s2maps.eu by EOX IT Services GmbH (Contains modified Copernicus Sentinel data 2016 & 2017)");
-		ImGui::EndDock();
+		ImGui::End();
 	}
 
 
