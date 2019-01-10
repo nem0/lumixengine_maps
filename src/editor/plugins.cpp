@@ -1,13 +1,14 @@
-#include "editor/platform_interface.h"
 #include "editor/render_interface.h"
 #include "editor/studio_app.h"
 #include "editor/utils.h"
 #include "editor/world_editor.h"
+#include "engine/engine.h"
 #include "engine/fs/os_file.h"
 #include "engine/log.h"
 #include "engine/math_utils.h"
 #include "engine/mt/sync.h"
 #include "engine/mt/task.h"
+#include "engine/os.h"
 #include "engine/path_utils.h"
 #include "imgui/imgui.h"
 #include "stb/stb_image.h"
@@ -337,7 +338,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	bool browse()
 	{
-		return PlatformInterface::getSaveFilename(m_out_path, lengthOf(m_out_path), "Raw Image\0*.raw\0", "raw");
+		return OS::getSaveFilename(m_out_path, lengthOf(m_out_path), "Raw Image\0*.raw\0", "raw");
 	}
 
 
