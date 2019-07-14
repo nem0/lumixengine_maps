@@ -1,4 +1,4 @@
-project "lumixengine_maps"
+project "maps"
 	libType()
 	files { 
 		"src/**.c",
@@ -6,7 +6,6 @@ project "lumixengine_maps"
 		"src/**.h",
 		"genie.lua"
 	}
-	includedirs { "../../lumixengine_maps/src", }
 	defines { "BUILDING_MAPS" }
 	links { "engine" }
 	useLua()

@@ -6,7 +6,7 @@ namespace Lumix
 {
 
 
-LUMIX_PLUGIN_ENTRY(lumixengine_maps)
+LUMIX_PLUGIN_ENTRY(maps)
 {
 	return nullptr;
 }

@@ -3,9 +3,8 @@
 #include "editor/utils.h"
 #include "editor/world_editor.h"
 #include "engine/engine.h"
-#include "engine/fs/os_file.h"
 #include "engine/log.h"
-#include "engine/math_utils.h"
+#include "engine/math.h"
 #include "engine/mt/sync.h"
 #include "engine/mt/task.h"
 #include "engine/os.h"
@@ -34,8 +33,8 @@ double tilex2long(double x, int z)
 
 double tiley2lat(double y, int z)
 {
-	double n = Math::PI - 2.0 * Math::PI * y / pow(2.0, z);
-	return 180.0 / Math::PI * atan(0.5 * (exp(n) - exp(-n)));
+	double n = PI - 2.0 * PI * y / pow(2.0, z);
+	return 180.0 / PI * atan(0.5 * (exp(n) - exp(-n)));
 }
 
 
@@ -199,7 +198,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		WORD sockVer;
 		WSADATA wsaData;
 		sockVer = 2 | (2 << 8);
-		if (WSAStartup(sockVer, &wsaData) != 0) g_log_error.log("Maps") << "Failed to init winsock.";
+		if (WSAStartup(sockVer, &wsaData) != 0) logError("Maps") << "Failed to init winsock.";
 
 		Action* action = LUMIX_NEW(app.getWorldEditor().getAllocator(), Action)("Maps", "maps", "maps");
 		action->func.bind<MapsPlugin, &MapsPlugin::toggleOpen>(this);
@@ -313,7 +312,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				task->out = (u8*)&m_satellite_map.pixels[i * TILE_SIZE + j * 256 * map_size];
 				task->stride_bytes = map_size * sizeof(u32);
 				task->mutex = &m_satellite_map.mutex;
-				task->create("download_image");
+				task->create("download_image", true);
 				m_satellite_map.tasks.push(task);
 			}
 		}
@@ -329,7 +328,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				task->out = (u8*)&m_height_map.pixels[i * 256 + j * 256 * map_size];
 				task->stride_bytes = map_size * sizeof(u32);
 				task->mutex = &m_height_map.mutex;
-				task->create("download_hm");
+				task->create("download_hm", true);
 				m_height_map.tasks.push(task);
 			}
 		}
@@ -380,10 +379,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		WorldEditor& editor = m_app.getWorldEditor();
 		IAllocator& allocator = editor.getAllocator();
-		FS::OsFile file;
-		if (!file.open(m_out_path, FS::Mode::CREATE_AND_WRITE))
-		{
-			g_log_error.log("Maps") << "Failed to save " << m_out_path;
+		OS::OutputFile file;
+		if (!file.open(m_out_path)) {
+			logError("Maps") << "Failed to save " << m_out_path;
 			return;
 		}
 		file.write(&raw[0], raw.size() * 2);
@@ -444,7 +442,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	void zoom(int dz)
 	{
-		int new_zoom = Math::clamp(m_zoom + dz, m_size, MAX_ZOOM);
+		int new_zoom = clamp(m_zoom + dz, m_size, MAX_ZOOM);
 		dz = new_zoom - m_zoom;
 		if (dz > 0)
 		{
@@ -510,7 +508,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		if (ImGui::IsMouseReleased(0) && ImGui::IsItemHovered())
 		{
 			ImVec2 up_pos = ImGui::GetMousePos();
-			double diff = Math::maximum(Math::abs(up_pos.x - m_mouse_down_pos.x), Math::abs(up_pos.y - m_mouse_down_pos.y));
+			double diff = maximum(abs(up_pos.x - m_mouse_down_pos.x), abs(up_pos.y - m_mouse_down_pos.y));
 			int new_zoom = m_zoom;
 			while (diff * 2 < 256)
 			{
@@ -521,8 +519,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			{
 				double x = m_x / double(1 << m_zoom);
 				double y = m_y / double(1 << m_zoom);
-				double left = Math::minimum(up_pos.x, m_mouse_down_pos.x) - cursor_pos.x;
-				double up = Math::minimum(up_pos.y, m_mouse_down_pos.y) - cursor_pos.y;
+				double left = minimum(up_pos.x, m_mouse_down_pos.x) - cursor_pos.x;
+				double up = minimum(up_pos.y, m_mouse_down_pos.y) - cursor_pos.y;
 				x += (left / MAP_UI_SIZE) / (1 << (m_zoom - m_size));
 				y += (up / MAP_UI_SIZE) / (1 << (m_zoom - m_size));
 				m_x = int(x * (1 << new_zoom));
@@ -533,7 +531,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		double lat = double(tiley2lat(double(m_y + (1 << (m_size - 1))), m_zoom));
-		double width = 256 * (1 << m_size) * 156543.03 * cos(Math::degreesToRadians(lat)) / (1 << m_zoom);
+		double width = 256 * (1 << m_size) * 156543.03 * cos(degreesToRadians(lat)) / (1 << m_zoom);
 
 		ImGui::Text("Width: %fkm", width / 1000);
 		ImGui::Text("Uses https://aws.amazon.com/public-datasets/terrain/");
@@ -560,7 +558,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 } // anonoymous namespace
 
 
-LUMIX_STUDIO_ENTRY(lumixengine_maps)
+LUMIX_STUDIO_ENTRY(maps)
 {
 	WorldEditor& editor = app.getWorldEditor();
 
