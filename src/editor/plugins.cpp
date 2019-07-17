@@ -5,6 +5,7 @@
 #include "engine/engine.h"
 #include "engine/log.h"
 #include "engine/math.h"
+#include "engine/mt/atomic.h"
 #include "engine/mt/sync.h"
 #include "engine/mt/task.h"
 #include "engine/os.h"
@@ -55,6 +56,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			, tasks(allocator) 
 		{
 			pixels.resize(TILE_SIZE * TILE_SIZE * tiles_count);
+			memset(pixels.begin(), 0xff, pixels.byte_size());
 		}
 
 		Array<MapsTask*> tasks;
@@ -102,14 +104,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			u8 buf[1024];
 			while (int r = ::recv(socket, (char*)buf, sizeof(buf), 0))
 			{
-				ASSERT(r != SOCKET_ERROR);
-				if (canceled)
-				{
-					closesocket(socket);
+				ASSERT(r != SOCKET_ERROR || canceled);
+				if (canceled) {
 					return false;
 				}
-				if (r > 0)
-				{
+				if (r > 0) {
+					MT::atomicAdd(downloaded_bytes, r);
 					data->resize(data->size() + r);
 					copyMemory(&(*data)[data->size() - r], buf, r);
 				}
@@ -133,9 +133,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			const char* ip = inet_ntoa(**(in_addr**)hostname->h_addr_list);
 			sin.sin_addr.s_addr = ip ? ::inet_addr(ip) : INADDR_ANY;
 
-			if (::connect(socket, (LPSOCKADDR)&sin, sizeof(sin)) != 0)
-			{
-				closesocket(socket);
+			if (::connect(socket, (LPSOCKADDR)&sin, sizeof(sin)) != 0) {
 				return INVALID_SOCKET;
 			}
 			return socket;
@@ -166,25 +164,25 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		int task() override
 		{
-			SOCKET socket = connect(host);
+			socket = connect(host);
 			if (socket == INVALID_SOCKET) return -1;
 
 			sendHTTPHeader(socket, host, path);
 
 			Array<u8> data(allocator);
 			if(!readAll(socket, &data)) return -1;
-			closesocket(socket);
 			
 			return parseImage(data) ? 0 : -1;
 		}
 
-
+		SOCKET socket = INVALID_SOCKET;
 		MT::SpinMutex* mutex;
 		StaticString<MAX_PATH_LENGTH> host;
 		StaticString<1024> path;
 		u8* out;
 		int stride_bytes;
 		IAllocator& allocator;
+		volatile i32* downloaded_bytes;
 		volatile bool canceled = false;
 	};
 
@@ -222,12 +220,16 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		for (MapsTask* task : m_satellite_map.tasks)
 		{
 			task->canceled = true;
+			closesocket(task->socket);
+
 			task->destroy();
 			LUMIX_DELETE(allocator, task);
 		}
 		for (MapsTask* task : m_height_map.tasks)
 		{
 			task->canceled = true;
+			closesocket(task->socket);
+			
 			task->destroy();
 			LUMIX_DELETE(allocator, task);
 		}
@@ -291,6 +293,14 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	void download()
 	{
 		finishAllTasks();
+		WorldEditor& editor = m_app.getWorldEditor();
+		memset(m_satellite_map.pixels.begin(), 0xff, m_satellite_map.pixels.byte_size());
+		memset(m_height_map.pixels.begin(), 0xff, m_height_map.pixels.byte_size());
+		RenderInterface* ri = editor.getRenderInterface();
+		const int map_size = TILE_SIZE * (1 << m_size);
+		m_satellite_map.texture = ri->createTexture("maps", &m_satellite_map.pixels[0], map_size, map_size);
+		m_height_map.texture = ri->createTexture("maps", &m_height_map.pixels[0], map_size, map_size);
+
 		m_is_download_deferred = false;
 
 		int world_size = 1 << m_zoom;
@@ -298,7 +308,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		m_y = (m_y + world_size) % world_size;
 
 		IAllocator& allocator = m_app.getWorldEditor().getEngine().getAllocator();
-		int map_size = TILE_SIZE * (1 << m_size);
 		char url[1024];
 		for (int j = 0; j < (1 << m_size); ++j)
 		{
@@ -309,6 +318,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				// https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2017_3857/default/g/2/1/1.jpg
 				task->host = "tiles.maps.eox.at";
 				task->path = url;
+				task->downloaded_bytes = &m_downloaded_bytes;
 				task->out = (u8*)&m_satellite_map.pixels[i * TILE_SIZE + j * 256 * map_size];
 				task->stride_bytes = map_size * sizeof(u32);
 				task->mutex = &m_satellite_map.mutex;
@@ -325,6 +335,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				MapsTask* task = LUMIX_NEW(allocator, MapsTask)(allocator);
 				task->host = "s3.amazonaws.com";
 				task->path = url;
+				task->downloaded_bytes = &m_downloaded_bytes;
 				task->out = (u8*)&m_height_map.pixels[i * 256 + j * 256 * map_size];
 				task->stride_bytes = map_size * sizeof(u32);
 				task->mutex = &m_height_map.mutex;
@@ -405,6 +416,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			{
 				any_finished = true;
 				data->tasks.eraseFast(i);
+				closesocket(task->socket);
 				task->destroy();
 				LUMIX_DELETE(allocator, task);
 			}
@@ -469,6 +481,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			ImGui::End();
 			return;
 		}
+		
+		ImGui::Text("Running tasks: %d", m_satellite_map.tasks.size() + m_height_map.tasks.size());
+		ImGui::Text("Downloaded: %dkB", m_downloaded_bytes / 1024);
 
 		if (m_is_download_deferred) download();
 
@@ -501,8 +516,13 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		ImGui::Checkbox("Show HeightMap", &show_hm);
 
 		ImVec2 cursor_pos = ImGui::GetCursorScreenPos();
-		if (m_satellite_map.texture && !show_hm) ImGui::Image(m_satellite_map.texture, ImVec2(MAP_UI_SIZE, MAP_UI_SIZE));
-		if (m_height_map.texture && show_hm) ImGui::Image(m_height_map.texture, ImVec2(MAP_UI_SIZE, MAP_UI_SIZE));
+		if (m_satellite_map.texture && !show_hm) ImGui::ImageButton(m_satellite_map.texture, ImVec2(MAP_UI_SIZE, MAP_UI_SIZE));
+		if (m_height_map.texture && show_hm) ImGui::ImageButton(m_height_map.texture, ImVec2(MAP_UI_SIZE, MAP_UI_SIZE));
+
+		if(ImGui::IsMouseDown(0) && ImGui::IsItemHovered()) {
+			ImDrawList* dl = ImGui::GetWindowDrawList();
+			dl->AddRect(m_mouse_down_pos, ImGui::GetMousePos(), 0xff000000);
+		}
 
 		if (ImGui::IsMouseClicked(0) && ImGui::IsItemHovered()) m_mouse_down_pos = ImGui::GetMousePos();
 		if (ImGui::IsMouseReleased(0) && ImGui::IsItemHovered())
@@ -510,7 +530,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			ImVec2 up_pos = ImGui::GetMousePos();
 			double diff = maximum(abs(up_pos.x - m_mouse_down_pos.x), abs(up_pos.y - m_mouse_down_pos.y));
 			int new_zoom = m_zoom;
-			while (diff * 2 < 256)
+			while (diff * 2 < 256 && diff > 0)
 			{
 				++new_zoom;
 				diff *= 2;
@@ -544,6 +564,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	StudioApp& m_app;
 	ImageData m_satellite_map;
 	ImageData m_height_map;
+	volatile i32 m_downloaded_bytes = 0;
 	bool m_open = false;
 	bool m_is_download_deferred = true;
 	int m_zoom = 1;
