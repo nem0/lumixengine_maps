@@ -10,3 +10,5 @@ project "maps"
 	links { "engine" }
 	useLua()
 	defaultConfigurations()
+
+linkPlugin("maps")

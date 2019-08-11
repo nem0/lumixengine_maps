@@ -60,7 +60,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		Array<MapsTask*> tasks;
-		MT::SpinMutex mutex;
+		MT::CriticalSection mutex;
 		ImTextureID texture = nullptr;
 		Array<u32> pixels;
 	};
@@ -150,13 +150,13 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			if (!pixels || canceled) return false;
 
 			ASSERT(w == 256 && h == 256);
-			mutex->lock();
+			mutex->enter();
 			int row_size = w * sizeof(u32);
 			for (int j = 0; j < h; ++j)
 			{
 				copyMemory(&out[j * stride_bytes], &pixels[j * row_size], row_size);
 			}
-			mutex->unlock();
+			mutex->exit();
 			stbi_image_free(pixels);
 			return true;
 		}
@@ -176,7 +176,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		SOCKET socket = INVALID_SOCKET;
-		MT::SpinMutex* mutex;
+		MT::CriticalSection* mutex;
 		StaticString<MAX_PATH_LENGTH> host;
 		StaticString<1024> path;
 		u8* out;
@@ -348,7 +348,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	bool browse()
 	{
-		return OS::getSaveFilename(m_out_path, lengthOf(m_out_path), "Raw Image\0*.raw\0", "raw");
+		return OS::getSaveFilename(Span(m_out_path), "Raw Image\0*.raw\0", "raw");
 	}
 
 
@@ -428,9 +428,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		if (data->texture) ri->destroyTexture(data->texture);
 
 		int map_size = TILE_SIZE * (1 << m_size);
-		data->mutex.lock();
+		data->mutex.enter();
 		data->texture = ri->createTexture("maps", &data->pixels[0], map_size, map_size);
-		data->mutex.unlock();
+		data->mutex.exit();
 	}
 
 
