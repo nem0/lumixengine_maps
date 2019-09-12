@@ -401,7 +401,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		RenderInterface* ri = editor.getRenderInterface();
 		PathUtils::FileInfo file_info(m_out_path);
 		StaticString<MAX_PATH_LENGTH> tga_path(file_info.m_dir, "/", file_info.m_basename, ".tga");
-		ri->saveTexture(editor.getEngine(), tga_path, &m_satellite_map.pixels[0], map_size, map_size);
+		ri->saveTexture(editor.getEngine(), tga_path, &m_satellite_map.pixels[0], map_size, map_size, true);
 	}
 
 
