@@ -415,7 +415,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			if (task->isFinished())
 			{
 				any_finished = true;
-				data->tasks.eraseFast(i);
+				data->tasks.swapAndPop(i);
 				closesocket(task->socket);
 				task->destroy();
 				LUMIX_DELETE(allocator, task);
