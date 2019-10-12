@@ -53,13 +53,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	{
 		ImageData(int tiles_count, IAllocator& allocator) 
 			: pixels(allocator)
-			, tasks(allocator) 
 		{
 			pixels.resize(TILE_SIZE * TILE_SIZE * tiles_count);
 			memset(pixels.begin(), 0xff, pixels.byte_size());
 		}
 
-		Array<MapsTask*> tasks;
 		MT::CriticalSection mutex;
 		ImTextureID texture = nullptr;
 		Array<u32> pixels;
@@ -192,6 +190,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		, m_open(false)
 		, m_satellite_map(4, app.getWorldEditor().getAllocator())
 		, m_height_map(4, app.getWorldEditor().getAllocator())
+		, m_in_progress(app.getWorldEditor().getAllocator())
+		, m_queue(app.getWorldEditor().getAllocator())
 	{
 		WORD sockVer;
 		WSADATA wsaData;
@@ -217,24 +217,18 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	void finishAllTasks()
 	{
 		IAllocator& allocator = m_app.getWorldEditor().getEngine().getAllocator();
-		for (MapsTask* task : m_satellite_map.tasks)
-		{
+		for (MapsTask* task : m_in_progress) {
 			task->canceled = true;
 			closesocket(task->socket);
 
 			task->destroy();
 			LUMIX_DELETE(allocator, task);
 		}
-		for (MapsTask* task : m_height_map.tasks)
-		{
-			task->canceled = true;
-			closesocket(task->socket);
-			
-			task->destroy();
+		for (MapsTask* task : m_queue) {
 			LUMIX_DELETE(allocator, task);
 		}
-		m_height_map.tasks.clear();
-		m_satellite_map.tasks.clear();
+		m_queue.clear();
+		m_in_progress.clear();
 	}
 
 
@@ -322,8 +316,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				task->out = (u8*)&m_satellite_map.pixels[i * TILE_SIZE + j * 256 * map_size];
 				task->stride_bytes = map_size * sizeof(u32);
 				task->mutex = &m_satellite_map.mutex;
-				task->create("download_image", true);
-				m_satellite_map.tasks.push(task);
+//				task->create("download_image", true);
+				m_queue.push(task);
+//				m_satellite_map.tasks.push(task);
 			}
 		}
 
@@ -339,8 +334,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				task->out = (u8*)&m_height_map.pixels[i * 256 + j * 256 * map_size];
 				task->stride_bytes = map_size * sizeof(u32);
 				task->mutex = &m_height_map.mutex;
-				task->create("download_hm", true);
-				m_height_map.tasks.push(task);
+				//task->create("download_hm", true);
+				m_queue.push(task);
+				//m_height_map.tasks.push(task);
 			}
 		}
 	}
@@ -405,32 +401,37 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	}
 
 
-	void checkTasks(ImageData* data) const
+	void checkTasks()
 	{
 		IAllocator& allocator = m_app.getWorldEditor().getEngine().getAllocator();
-		bool any_finished = false;
-		for (int i = data->tasks.size() - 1; i >= 0; --i)
-		{
-			MapsTask* task = data->tasks[i];
-			if (task->isFinished())
-			{
-				any_finished = true;
-				data->tasks.swapAndPop(i);
+		u8 finished = 0;
+
+		for (int i = m_in_progress.size() - 1; i >= 0; --i) {
+			MapsTask* task = m_in_progress[i];
+			if (task->isFinished()) {
+				const bool is_hm = task->out < (u8*)m_satellite_map.pixels.begin() || task->out >= (u8*)m_satellite_map.pixels.end();
+				finished |= is_hm ? 1 : 2;
+				m_in_progress.swapAndPop(i);
 				closesocket(task->socket);
 				task->destroy();
 				LUMIX_DELETE(allocator, task);
 			}
 		}
 
-		if (!any_finished) return;
+		if (!finished) return;
 
-		RenderInterface* ri = m_app.getWorldEditor().getRenderInterface();
-		if (data->texture) ri->destroyTexture(data->texture);
+		for(u32 i = 0; i < 2; ++i) {
+			if ((finished & (1 << i)) == 0) continue;
 
-		int map_size = TILE_SIZE * (1 << m_size);
-		data->mutex.enter();
-		data->texture = ri->createTexture("maps", &data->pixels[0], map_size, map_size);
-		data->mutex.exit();
+			ImageData* data = i == 0 ? &m_height_map : &m_satellite_map;
+			RenderInterface* ri = m_app.getWorldEditor().getRenderInterface();
+			if (data->texture) ri->destroyTexture(data->texture);
+
+			int map_size = TILE_SIZE * (1 << m_size);
+			data->mutex.enter();
+			data->texture = ri->createTexture("maps", &data->pixels[0], map_size, map_size);
+			data->mutex.exit();
+		}
 	}
 
 
@@ -473,8 +474,14 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	void onWindowGUI() override
 	{
-		checkTasks(&m_satellite_map);
-		checkTasks(&m_height_map);
+		while (!m_queue.empty() && m_in_progress.size() < 8) {
+			MapsTask* task = m_queue.back();
+			m_queue.pop();
+			task->create("download_maps_task", true);
+			m_in_progress.push(task);
+		}
+
+		checkTasks();
 
 		if (!ImGui::Begin("Maps", &m_open))
 		{
@@ -482,12 +489,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			return;
 		}
 		
-		ImGui::Text("Running tasks: %d", m_satellite_map.tasks.size() + m_height_map.tasks.size());
+		ImGui::Text("Running tasks: %d", m_queue.size() + m_in_progress.size());
 		ImGui::Text("Downloaded: %dkB", m_downloaded_bytes / 1024);
 
 		if (m_is_download_deferred) download();
 
-		if (ImGui::Combo("Size", &m_size, "1x1\0" "2x2\0" "4x4\0" "8x8\0")) resize();
+		if (ImGui::Combo("Size", &m_size, "1x1\0" "2x2\0" "4x4\0" "8x8\0" "16x16\0")) resize();
 
 		int current_zoom = m_zoom;
 		if (ImGui::SliderInt("Zoom", &current_zoom, m_size, MAX_ZOOM)) zoom(current_zoom - m_zoom);
@@ -564,6 +571,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	StudioApp& m_app;
 	ImageData m_satellite_map;
 	ImageData m_height_map;
+	Array<MapsTask*> m_queue;
+	Array<MapsTask*> m_in_progress;
 	volatile i32 m_downloaded_bytes = 0;
 	bool m_open = false;
 	bool m_is_download_deferred = true;
