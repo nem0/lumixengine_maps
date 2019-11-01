@@ -109,7 +109,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				if (r > 0) {
 					MT::atomicAdd(downloaded_bytes, r);
 					data->resize(data->size() + r);
-					copyMemory(&(*data)[data->size() - r], buf, r);
+					memcpy(&(*data)[data->size() - r], buf, r);
 				}
 			}
 			return true;
@@ -122,7 +122,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			if (socket == INVALID_SOCKET) return INVALID_SOCKET;
 
 			SOCKADDR_IN sin;
-			setMemory(&sin, 0, sizeof(sin));
+			memset(&sin, 0, sizeof(sin));
 			sin.sin_family = AF_INET;
 			sin.sin_port = htons(80);
 			hostent* hostname = gethostbyname(host);
@@ -152,7 +152,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			int row_size = w * sizeof(u32);
 			for (int j = 0; j < h; ++j)
 			{
-				copyMemory(&out[j * stride_bytes], &pixels[j * row_size], row_size);
+				memcpy(&out[j * stride_bytes], &pixels[j * row_size], row_size);
 			}
 			mutex->exit();
 			stbi_image_free(pixels);
@@ -498,6 +498,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		int current_zoom = m_zoom;
 		if (ImGui::SliderInt("Zoom", &current_zoom, m_size, MAX_ZOOM)) zoom(current_zoom - m_zoom);
+		if (m_zoom > 12) {
+			ImGui::Text("Heightmap might have artifacts at this level.");
+		}
 
 		ImGui::LabelText("Output", m_out_path);
 		ImGui::SameLine();
