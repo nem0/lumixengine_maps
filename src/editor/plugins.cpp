@@ -11,6 +11,7 @@
 #include "engine/os.h"
 #include "engine/path_utils.h"
 #include "imgui/imgui.h"
+#include "renderer/texture.h"
 #include "stb/stb_image.h"
 #include <WinSock2.h>
 #include <Windows.h>
@@ -391,7 +392,15 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			logError("Maps") << "Failed to save " << m_out_path;
 			return;
 		}
-		file.write(&raw[0], raw.size() * 2);
+		RawTextureHeader header;
+		header.channels_count = 1;
+		header.channel_type = RawTextureHeader::ChannelType::U16;
+		header.depth = 1;
+		header.is_array = false;
+		header.width = map_size;
+		header.height = map_size;
+		file.write(&header, sizeof(header));
+		file.write(&raw[0], raw.byte_size());
 		file.close();
 
 		RenderInterface* ri = editor.getRenderInterface();
