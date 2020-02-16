@@ -1,3 +1,4 @@
+#define LUMIX_NO_CUSTOM_CRT
 #include "editor/render_interface.h"
 #include "editor/studio_app.h"
 #include "editor/utils.h"
@@ -7,12 +8,13 @@
 #include "engine/math.h"
 #include "engine/mt/atomic.h"
 #include "engine/mt/sync.h"
-#include "engine/mt/task.h"
+#include "engine/mt/thread.h"
 #include "engine/os.h"
 #include "engine/path_utils.h"
 #include "imgui/imgui.h"
 #include "renderer/texture.h"
 #include "stb/stb_image.h"
+
 #include <WinSock2.h>
 #include <Windows.h>
 #include <cmath>
@@ -65,10 +67,10 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	};
 
 
-	struct MapsTask : public MT::Task
+	struct MapsTask : public MT::Thread
 	{
 		MapsTask(IAllocator& _allocator)
-			: Task(_allocator)
+			: Thread(_allocator)
 			, allocator(_allocator)
 		{
 		}
@@ -189,19 +191,19 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	MapsPlugin(StudioApp& app)
 		: m_app(app)
 		, m_open(false)
-		, m_satellite_map(4, app.getWorldEditor().getAllocator())
-		, m_height_map(4, app.getWorldEditor().getAllocator())
-		, m_in_progress(app.getWorldEditor().getAllocator())
-		, m_queue(app.getWorldEditor().getAllocator())
+		, m_satellite_map(4, app.getAllocator())
+		, m_height_map(4, app.getAllocator())
+		, m_in_progress(app.getAllocator())
+		, m_queue(app.getAllocator())
 	{
 		WORD sockVer;
 		WSADATA wsaData;
 		sockVer = 2 | (2 << 8);
 		if (WSAStartup(sockVer, &wsaData) != 0) logError("Maps") << "Failed to init winsock.";
 
-		Action* action = LUMIX_NEW(app.getWorldEditor().getAllocator(), Action)("Maps", "maps", "maps");
-		action->func.bind<MapsPlugin, &MapsPlugin::toggleOpen>(this);
-		action->is_selected.bind<MapsPlugin, &MapsPlugin::isOpen>(this);
+		Action* action = LUMIX_NEW(app.getAllocator(), Action)("Maps", "maps", "maps");
+		action->func.bind<&MapsPlugin::toggleOpen>(this);
+		action->is_selected.bind<&MapsPlugin::isOpen>(this);
 		app.addWindowAction(action);
 		m_out_path[0] = '\0';
 	}
