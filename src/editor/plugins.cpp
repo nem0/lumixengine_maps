@@ -61,7 +61,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			memset(pixels.begin(), 0xff, pixels.byte_size());
 		}
 
-		MT::CriticalSection mutex;
+		MT::Mutex mutex;
 		ImTextureID texture = nullptr;
 		Array<u32> pixels;
 	};
@@ -177,7 +177,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		SOCKET socket = INVALID_SOCKET;
-		MT::CriticalSection* mutex;
+		MT::Mutex* mutex;
 		StaticString<MAX_PATH_LENGTH> host;
 		StaticString<1024> path;
 		u8* out;
