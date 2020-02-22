@@ -6,11 +6,11 @@
 #include "engine/engine.h"
 #include "engine/log.h"
 #include "engine/math.h"
-#include "engine/mt/atomic.h"
-#include "engine/mt/sync.h"
-#include "engine/mt/thread.h"
+#include "engine/atomic.h"
 #include "engine/os.h"
-#include "engine/path_utils.h"
+#include "engine/path.h"
+#include "engine/sync.h"
+#include "engine/thread.h"
 #include "imgui/imgui.h"
 #include "renderer/texture.h"
 #include "stb/stb_image.h"
@@ -61,13 +61,13 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			memset(pixels.begin(), 0xff, pixels.byte_size());
 		}
 
-		MT::Mutex mutex;
+		Mutex mutex;
 		ImTextureID texture = nullptr;
 		Array<u32> pixels;
 	};
 
 
-	struct MapsTask : public MT::Thread
+	struct MapsTask : public Thread
 	{
 		MapsTask(IAllocator& _allocator)
 			: Thread(_allocator)
@@ -110,7 +110,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 					return false;
 				}
 				if (r > 0) {
-					MT::atomicAdd(downloaded_bytes, r);
+					atomicAdd(downloaded_bytes, r);
 					data->resize(data->size() + r);
 					memcpy(&(*data)[data->size() - r], buf, r);
 				}
@@ -177,7 +177,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		SOCKET socket = INVALID_SOCKET;
-		MT::Mutex* mutex;
+		Mutex* mutex;
 		StaticString<MAX_PATH_LENGTH> host;
 		StaticString<1024> path;
 		u8* out;
@@ -406,7 +406,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		file.close();
 
 		RenderInterface* ri = editor.getRenderInterface();
-		PathUtils::FileInfo file_info(m_out_path);
+		PathInfo file_info(m_out_path);
 		StaticString<MAX_PATH_LENGTH> tga_path(file_info.m_dir, "/", file_info.m_basename, ".tga");
 		ri->saveTexture(editor.getEngine(), tga_path, &m_satellite_map.pixels[0], map_size, map_size, true);
 	}
