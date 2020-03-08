@@ -252,12 +252,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	{
 		if (m_satellite_map.texture)
 		{
-			m_app.getWorldEditor().getRenderInterface()->destroyTexture(m_satellite_map.texture);
+			m_app.getRenderInterface()->destroyTexture(m_satellite_map.texture);
 			m_satellite_map.texture = nullptr;
 		}
 		if (m_height_map.texture)
 		{
-			m_app.getWorldEditor().getRenderInterface()->destroyTexture(m_height_map.texture);
+			m_app.getRenderInterface()->destroyTexture(m_height_map.texture);
 			m_height_map.texture = nullptr;
 		}
 		m_satellite_map.pixels.clear();
@@ -293,7 +293,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		WorldEditor& editor = m_app.getWorldEditor();
 		memset(m_satellite_map.pixels.begin(), 0xff, m_satellite_map.pixels.byte_size());
 		memset(m_height_map.pixels.begin(), 0xff, m_height_map.pixels.byte_size());
-		RenderInterface* ri = editor.getRenderInterface();
+		RenderInterface* ri = m_app.getRenderInterface();
 		const int map_size = TILE_SIZE * (1 << m_size);
 		m_satellite_map.texture = ri->createTexture("maps", &m_satellite_map.pixels[0], map_size, map_size);
 		m_height_map.texture = ri->createTexture("maps", &m_height_map.pixels[0], map_size, map_size);
@@ -304,7 +304,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		m_x = (m_x + world_size) % world_size;
 		m_y = (m_y + world_size) % world_size;
 
-		IAllocator& allocator = m_app.getWorldEditor().getEngine().getAllocator();
+		IAllocator& allocator = editor.getEngine().getAllocator();
 		char url[1024];
 		for (int j = 0; j < (1 << m_size); ++j)
 		{
@@ -405,7 +405,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		file.write(&raw[0], raw.byte_size());
 		file.close();
 
-		RenderInterface* ri = editor.getRenderInterface();
+		RenderInterface* ri = m_app.getRenderInterface();
 		PathInfo file_info(m_out_path);
 		StaticString<MAX_PATH_LENGTH> tga_path(file_info.m_dir, "/", file_info.m_basename, ".tga");
 		ri->saveTexture(editor.getEngine(), tga_path, &m_satellite_map.pixels[0], map_size, map_size, true);
@@ -435,7 +435,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			if ((finished & (1 << i)) == 0) continue;
 
 			ImageData* data = i == 0 ? &m_height_map : &m_satellite_map;
-			RenderInterface* ri = m_app.getWorldEditor().getRenderInterface();
+			RenderInterface* ri = m_app.getRenderInterface();
 			if (data->texture) ri->destroyTexture(data->texture);
 
 			int map_size = TILE_SIZE * (1 << m_size);
