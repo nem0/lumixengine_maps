@@ -3,20 +3,33 @@
 #include "editor/studio_app.h"
 #include "editor/utils.h"
 #include "editor/world_editor.h"
+#include "engine/atomic.h"
 #include "engine/engine.h"
+#include "engine/geometry.h"
+#include "engine/hash_map.h"
 #include "engine/log.h"
 #include "engine/math.h"
-#include "engine/atomic.h"
 #include "engine/os.h"
 #include "engine/path.h"
+#include "engine/reflection.h"
 #include "engine/sync.h"
 #include "engine/thread.h"
 #include "imgui/imgui.h"
 #include "renderer/texture.h"
 #include "stb/stb_image.h"
+#include "pugixml/pugixml.hpp"
 
-#include <WinSock2.h>
-#include <Windows.h>
+#ifdef _WIN32
+	#include <WinSock2.h>
+	#include <Windows.h>
+#else
+	#include <arpa/inet.h>
+	#include <netdb.h>
+	#include <netinet/in.h>
+	#include <sys/socket.h>
+ 	#include <unistd.h>
+ #endif
+
 #include <cmath>
 #include <cstdlib>
 #pragma comment(lib, "Ws2_32.lib")
@@ -28,15 +41,23 @@ using namespace Lumix;
 namespace
 {
 
+static const ComponentType MODEL_INSTANCE_TYPE = Reflection::getComponentType("model_instance");
+static const ComponentType TERRAIN_TYPE = Reflection::getComponentType("terrain");
 
-double tilex2long(double x, int z)
-{
+double long2tilex(double long lon, int z) {
+	return (lon + 180) * (1 << z) / 360.0;
+}
+
+double tilex2long(double x, int z) {
 	return x / pow(2.0, z) * 360.0 - 180;
 }
 
+double lat2tiley(double lat, int z) { 
+    const double latrad = lat * PI / 180.0;
+	return (1.0 - asinh(tan(latrad)) / PI) / 2.0 * (1 << z); 
+}
 
-double tiley2lat(double y, int z)
-{
+double tiley2lat(double y, int z) {
 	double n = PI - 2.0 * PI * y / pow(2.0, z);
 	return 180.0 / PI * atan(0.5 * (exp(n) - exp(-n)));
 }
@@ -45,6 +66,218 @@ double tiley2lat(double y, int z)
 constexpr int TILE_SIZE = 256;
 constexpr int MAX_ZOOM = 18;
 constexpr float MAP_UI_SIZE = 512;
+
+
+struct OSMParser {
+	OSMParser(StudioApp& app)
+		: m_app(app) 
+		, m_nodes(m_app.getAllocator())
+		, m_ways(m_app.getAllocator())
+	{}
+
+
+	bool toPos(pugi::xml_node nd_ref, Ref<DVec3> p) {
+			if (nd_ref.empty() || !equalStrings(nd_ref.name(), "nd")) return false;
+
+			pugi::xml_attribute ref_attr = nd_ref.attribute("ref");
+			if (ref_attr.empty()) return false;
+			const char* ref_str = ref_attr.value();
+			u64 node_id;
+			fromCString(Span(ref_str, (u32)strlen(ref_str)), Ref(node_id));
+
+			auto iter = m_nodes.find(node_id);
+			if (!iter.isValid()) return false;
+
+			pugi::xml_node n = iter.value();
+
+			pugi::xml_attribute lat_attr = n.attribute("lat");
+			pugi::xml_attribute lon_attr = n.attribute("lon");
+			
+			if (lat_attr.empty() || lon_attr.empty()) return false;
+
+			const double lat = atof(lat_attr.value());
+			const double lon = atof(lon_attr.value());
+
+			p->x = (lon - m_min_lon) / m_lon_range * m_scale;
+			p->y = 0;
+			p->z = (m_min_lat + m_lat_range - lat) / m_lat_range * m_scale;
+
+			return true;
+	}
+	
+	pugi::xml_node getNode(const pugi::xml_node& nd_ref) {
+		if (nd_ref.empty() || !equalStrings(nd_ref.name(), "nd")) return pugi::xml_node();
+		
+		pugi::xml_attribute ref_attr = nd_ref.attribute("ref");
+		if (ref_attr.empty()) return pugi::xml_node();
+		const char* ref_str = ref_attr.value();
+		u64 node_id;
+		fromCString(Span(ref_str, (u32)strlen(ref_str)), Ref(node_id));
+
+		auto iter = m_nodes.find(node_id);
+		if (!iter.isValid()) return pugi::xml_node();
+
+		return iter.value();
+	}
+
+	static bool isRoad(const pugi::xml_node& w) {
+		pugi::xml_node building_tag = w.find_child([](const pugi::xml_node& n){
+			if (!equalStrings(n.name(), "tag")) return false;
+			pugi::xml_attribute key_attr = n.attribute("k");
+			if (key_attr.empty()) return false;
+			const bool is_highway = equalStrings(key_attr.value(), "highway");
+			if (!is_highway) return false;
+			pugi::xml_attribute value_attr = n.attribute("v");
+			if (key_attr.empty()) return true;
+
+			const bool is_footway = equalStrings(value_attr.value(), "footway");
+			return !is_footway;
+		});
+		return !building_tag.empty();
+	}
+
+	static bool isBuilding(const pugi::xml_node& w) {
+		pugi::xml_node building_tag = w.find_child([](const pugi::xml_node& n){
+			if (!equalStrings(n.name(), "tag")) return false;
+			pugi::xml_attribute key_attr = n.attribute("k");
+			if (key_attr.empty()) return false;
+			return equalStrings(key_attr.value(), "building");
+		});
+		return !building_tag.empty();
+	}
+
+	void createBuilding(const pugi::xml_node& way) {
+		pugi::xml_node nd_ref = way.first_child();
+		DVec3 pos;
+		if (!toPos(nd_ref, Ref(pos))) return;
+
+		/*WorldEditor& editor = m_app.getWorldEditor();
+		const EntityRef e = editor.addEntityAt(pos);
+		editor.addComponent(Span(&e, 1), MODEL_INSTANCE_TYPE);
+		editor.setEntitiesScale(&e, 1, 10);
+		editor.setProperty(MODEL_INSTANCE_TYPE, -1, "Source", Span(&e, 1), Path("models/cube/cube.fbx"));*/
+		
+		// geom
+		DVec3 min_pos(m_min_lon, 0, m_min_lat);
+		DVec3 prev;
+		pugi::xml_node n = nd_ref;
+		if (!toPos(n, Ref(prev))) return;
+		const DVec3 first = prev;
+		for(;;) {
+			pugi::xml_node next = n.next_sibling();
+			if (next.empty() || !equalStrings(next.name(), "nd")) break;
+			DVec3 p;
+			if (!toPos(next, Ref(p))) break;
+
+			m_tris->push((prev - min_pos).toFloat());
+			m_tris->push((p - min_pos).toFloat());
+			m_tris->push((p - min_pos).toFloat() + Vec3(0, 6, 0));
+
+			m_tris->push((prev - min_pos).toFloat());
+			m_tris->push((p - min_pos).toFloat() + Vec3(0, 6, 0));
+			m_tris->push((prev - min_pos).toFloat() + Vec3(0, 6, 0));
+			prev = p;
+			n = next;
+		}
+	}
+
+	void createRoad(const pugi::xml_node& way) {
+		pugi::xml_node nd_ref = way.first_child();
+		DVec3 pos;
+		if (!toPos(nd_ref, Ref(pos))) return;
+
+		DVec3 min_pos(m_min_lon, 0, m_min_lat);
+		DVec3 prev;
+		pugi::xml_node n = nd_ref;
+		if (!toPos(n, Ref(prev))) return;
+		const DVec3 first = prev;
+		for(;;) {
+			pugi::xml_node next = n.next_sibling();
+			if (next.empty() || !equalStrings(next.name(), "nd")) break;
+			DVec3 p;
+			if (!toPos(next, Ref(p))) break;
+
+			const Vec3 a = (prev - min_pos).toFloat();
+			const Vec3 b = (p - min_pos).toFloat();
+			Vec3 norm = crossProduct(a - b, Vec3(0, 1, 0)).normalized();
+			m_tris->push(a - norm * 2);
+			m_tris->push(b - norm * 2);
+			m_tris->push(b + norm * 2);
+			
+			m_tris->push(a - norm * 2);
+			m_tris->push(b + norm * 2);
+			m_tris->push(a + norm * 2);
+			
+			prev = p;
+			n = next;
+		}
+	}
+
+	void parseOSM(double left, double bottom, double right, double top, float scale,  Ref<Array<Vec3>> lines, Ref<Array<Vec3>> tris) {
+		m_lines = &lines.value;
+		m_tris = &tris.value;
+		pugi::xml_document doc;
+		FILE* fp = fopen("map.osm", "rb");
+		fseek(fp, 0, SEEK_END);
+		Array<char> data(m_app.getAllocator());
+		data.resize(ftell(fp) + 1);
+		data.back() = '\0';
+		fseek(fp, 0, SEEK_SET);
+		fread(data.begin(), 1, data.size(), fp);
+		fclose(fp);
+		const pugi::xml_parse_result res = doc.load_string(data.begin());
+		ASSERT(pugi::status_ok == res.status);
+
+		pugi::xml_node osm_root = doc.root().first_child();
+
+		m_min_lon = left;
+		m_min_lat = bottom;
+		m_lat_range = top - bottom;
+		m_lon_range = right - left;
+		m_scale = scale;
+
+		for (pugi::xml_node n = osm_root.first_child(); !n.empty(); n = n.next_sibling()) {
+			if (equalStrings(n.name(), "node")) {
+				pugi::xml_attribute id_attr = n.attribute("id");
+				if (id_attr.empty()) continue;
+
+				const char* id_str = id_attr.value();
+				u64 id;
+				fromCString(Span(id_str, stringLength(id_str)), Ref(id));
+				m_nodes.insert(id, n);
+			}
+			else if (equalStrings(n.name(), "way")) {
+				pugi::xml_attribute id_attr = n.attribute("id");
+				if (id_attr.empty()) continue;
+
+				const char* id_str = id_attr.value();
+				u64 id;
+				fromCString(Span(id_str, stringLength(id_str)), Ref(id));
+				m_ways.insert(id, n);
+			}
+		}
+		
+		for (pugi::xml_node w : m_ways) {
+			if (isBuilding(w)) createBuilding(w);
+			else if (isRoad(w)) createRoad(w);
+		}
+
+		m_nodes.clear();
+		m_ways.clear();
+	}
+
+	StudioApp& m_app;
+	HashMap<u64, pugi::xml_node> m_nodes;
+	HashMap<u64, pugi::xml_node> m_ways;
+	double m_min_lat = 0;
+	double m_min_lon = 0;
+	double m_lat_range = 0.5f;
+	double m_lon_range = 0.5f;
+	float m_scale = 1;
+
+	Array<Vec3>* m_lines = nullptr;
+	Array<Vec3>* m_tris = nullptr;
+};
 
 
 struct MapsPlugin final : public StudioApp::GUIPlugin
@@ -69,6 +302,17 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	struct MapsTask : public Thread
 	{
+		#ifdef _WIN32
+			using SocketType = SOCKET;
+		#else
+			using SocketType = int;
+			using SOCKADDR_IN = sockaddr_in;
+			static constexpr int INVALID_SOCKET = -1;
+			static constexpr int SOCKET_ERROR = -1;
+			#define closesocket close
+		#endif
+		SocketType socket = INVALID_SOCKET;
+
 		MapsTask(IAllocator& _allocator)
 			: Thread(_allocator)
 			, allocator(_allocator)
@@ -88,8 +332,14 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			return 0;
 		}
 
+		static bool writeRawString(SocketType socket, const char* str)
+		{
+			int len = stringLength(str);
+			int send = ::send(socket, str, len, 0);
+			return send == len;
+		}
 
-		static void sendHTTPHeader(SOCKET socket, const char* host, const char* path)
+		static void sendHTTPHeader(SocketType socket, const char* host, const char* path)
 		{
 			writeRawString(socket, "GET ");
 			writeRawString(socket, path);
@@ -99,7 +349,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 
-		bool readAll(SOCKET socket, Array<u8>* data) const
+		bool readAll(SocketType socket, Array<u8>* data) const
 		{
 			data->reserve(256 * 256);
 			u8 buf[1024];
@@ -119,22 +369,22 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 
-		SOCKET connect(const char* host)
+		SocketType connect(const char* host)
 		{
-			SOCKET socket = ::socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
+			SocketType socket = ::socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
 			if (socket == INVALID_SOCKET) return INVALID_SOCKET;
 
-			SOCKADDR_IN sin;
-			memset(&sin, 0, sizeof(sin));
+			SOCKADDR_IN sin = {};
 			sin.sin_family = AF_INET;
 			sin.sin_port = htons(80);
+			
 			hostent* hostname = gethostbyname(host);
 			if (!hostname) return INVALID_SOCKET;
 
 			const char* ip = inet_ntoa(**(in_addr**)hostname->h_addr_list);
 			sin.sin_addr.s_addr = ip ? ::inet_addr(ip) : INADDR_ANY;
 
-			if (::connect(socket, (LPSOCKADDR)&sin, sizeof(sin)) != 0) {
+			if (::connect(socket, (const sockaddr*)&sin, sizeof(sin)) != 0) {
 				return INVALID_SOCKET;
 			}
 			return socket;
@@ -176,7 +426,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			return parseImage(data) ? 0 : -1;
 		}
 
-		SOCKET socket = INVALID_SOCKET;
 		Mutex* mutex;
 		StaticString<MAX_PATH_LENGTH> host;
 		StaticString<1024> path;
@@ -195,11 +444,16 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		, m_height_map(4, app.getAllocator())
 		, m_in_progress(app.getAllocator())
 		, m_queue(app.getAllocator())
+		, m_osm_parser(app)
+		, m_osm_lines(app.getAllocator())
+		, m_osm_tris(app.getAllocator())
 	{
-		WORD sockVer;
-		WSADATA wsaData;
-		sockVer = 2 | (2 << 8);
-		if (WSAStartup(sockVer, &wsaData) != 0) logError("Maps") << "Failed to init winsock.";
+		#ifdef _WIN32
+			WORD sockVer;
+			WSADATA wsaData;
+			sockVer = 2 | (2 << 8);
+			if (WSAStartup(sockVer, &wsaData) != 0) logError("Maps") << "Failed to init winsock.";
+		#endif
 
 		Action* action = LUMIX_NEW(app.getAllocator(), Action)("Maps", "maps", "maps");
 		action->func.bind<&MapsPlugin::toggleOpen>(this);
@@ -212,10 +466,15 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	~MapsPlugin()
 	{
 		finishAllTasks();
-		WSACleanup();
+		#ifdef _WIN32
+			WSACleanup();
+		#endif
 		clear();
 	}
 
+	void parseOSMData(double left, double bottom, double right, double top, float scale) {
+		m_osm_parser.parseOSM(left, bottom, right, top, scale, Ref(m_osm_lines), Ref(m_osm_tris));
+	}
 
 	void finishAllTasks()
 	{
@@ -238,14 +497,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	void toggleOpen() { m_open = !m_open; }
 	bool isOpen() const { return m_open; }
 	const char* getName() const override { return "maps"; }
-
-
-	static bool writeRawString(SOCKET socket, const char* str)
-	{
-		int len = stringLength(str);
-		int send = ::send(socket, str, len, 0);
-		return send == len;
-	}
 
 
 	void clear()
@@ -350,6 +601,24 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		return OS::getSaveFilename(Span(m_out_path), "Raw Image\0*.raw\0", "raw");
 	}
 
+	void createMapEntity() {
+		WorldEditor& editor = m_app.getWorldEditor();
+		const EntityRef e = editor.addEntityAt({0, 0, 0});
+		editor.addComponent(Span(&e, 1), TERRAIN_TYPE);
+		const PathInfo file_info(m_out_path);
+		StaticString<MAX_PATH_LENGTH> mat_path(file_info.m_dir, "/", file_info.m_basename, ".mat");
+		char rel_mat_path[MAX_PATH_LENGTH];
+		
+		if (!editor.getEngine().getFileSystem().makeRelative(Span(rel_mat_path), mat_path)) {
+			logError("Maps") << "Can not load " << mat_path << " because it's not in root directory.";
+		}
+		editor.setProperty(TERRAIN_TYPE, -1, "Material", Span(&e, 1), Path(rel_mat_path));
+
+		const double lat = double(tiley2lat(double(m_y + (1 << (m_size - 1))), m_zoom));
+		const double width = 256 * (1 << m_size) * 156543.03 * cos(degreesToRadians(lat)) / (1 << m_zoom);
+		const float scale = float(width / ((1 << m_size) * 256));
+		editor.setProperty(TERRAIN_TYPE, -1, "XZ scale", Span(&e, 1), scale);
+	}
 
 	void save()
 	{
@@ -409,6 +678,32 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		PathInfo file_info(m_out_path);
 		StaticString<MAX_PATH_LENGTH> tga_path(file_info.m_dir, "/", file_info.m_basename, ".tga");
 		ri->saveTexture(editor.getEngine(), tga_path, &m_satellite_map.pixels[0], map_size, map_size, true);
+
+		StaticString<MAX_PATH_LENGTH> mat_path(file_info.m_dir, "/", file_info.m_basename, ".mat");
+		OS::OutputFile mat_file;
+		if (mat_file.open(mat_path)) {
+			mat_file << R"#(
+				shader "pipelines/terrain.shd"
+				backface_culling(true)
+				layer "default"
+				emission(0.000000)
+				metallic(0.000000)
+				roughness(1.000000)
+				alpha_ref(0.300000)
+				defines {}
+				color { 1.000000, 1.000000, 1.000000, 1.000000 }
+				texture ")#" << file_info.m_basename << R"#(.raw"
+				texture ""
+				texture ""
+				texture ""
+				texture ")#" << file_info.m_basename << R"#(.tga"
+				texture ""
+				layer "default"
+				uniform("Detail distance", 0.000000)
+				uniform("Detail scale", 0.000000)
+			)#";
+			mat_file.close();
+		}
 	}
 
 
@@ -485,6 +780,26 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	void onWindowGUI() override
 	{
+		if (!m_osm_lines.empty()) {
+			UniverseView& view = m_app.getWorldEditor().getView();
+			const Vec3 cam_pos = view.getViewport().pos.toFloat();
+			UniverseView::Vertex* v = view.render(true, m_osm_lines.size());
+			for (i32 i = 0; i < m_osm_lines.size(); ++i) {
+				v[i].pos = m_osm_lines[i] - cam_pos;
+				v[i].abgr = 0xff0000ff;
+			}
+		}
+
+		if (!m_osm_tris.empty()) {
+			UniverseView& view = m_app.getWorldEditor().getView();
+			const Vec3 cam_pos = view.getViewport().pos.toFloat();
+			UniverseView::Vertex* v = view.render(false, m_osm_tris.size());
+			for (i32 i = 0; i < m_osm_tris.size(); ++i) {
+				v[i].pos = m_osm_tris[i] - cam_pos;
+				v[i].abgr = 0xff0000FF;
+			}
+		}
+
 		while (!m_queue.empty() && m_in_progress.size() < 8) {
 			MapsTask* task = m_queue.back();
 			m_queue.pop();
@@ -499,7 +814,33 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			ImGui::End();
 			return;
 		}
+
 		
+		double bottom = double(tiley2lat(double(m_y), m_zoom));
+		double left = double(tilex2long(double(m_x), m_zoom));
+		double top = double(tiley2lat(double(m_y + (1 << m_size)), m_zoom));
+		double right = double(tilex2long(double(m_x + (1 << m_size)), m_zoom));
+		if (bottom > top) swap(bottom, top);
+		if (left > right) swap(left, right);
+
+		const float scale = float(256 * (1 << m_size) * 156543.03 * cos(degreesToRadians(bottom)) / (1 << m_zoom));
+
+		if (ImGui::Button("OSM test")) parseOSMData(left, bottom, right, top, scale);
+		if (ImGui::Button("OSM download")) {
+			const StaticString<1024> osm_download_path("https://api.openstreetmap.org/api/0.6/map?bbox=", left, ",", bottom, ",", right, ",", top);
+			OS::shellExecuteOpen(osm_download_path);
+		}
+		static double go_lat = 0;
+		static double go_lon = 0;
+		ImGui::InputDouble("Lat", &go_lat);
+		ImGui::InputDouble("Lon", &go_lon);
+		if (ImGui::Button("Go")) {
+			double y = lat2tiley(go_lat, m_zoom);
+			double x = long2tilex(go_lon, m_zoom);
+			m_x = (int)x;
+			m_y = (int)y;
+			download();
+		}
 		ImGui::Text("Running tasks: %d", m_queue.size() + m_in_progress.size());
 		ImGui::Text("Downloaded: %dkB", m_downloaded_bytes / 1024);
 
@@ -513,11 +854,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			ImGui::Text("Heightmap might have artifacts at this level.");
 		}
 
-		ImGui::LabelText("Output", m_out_path);
+		ImGui::LabelText("Output", "%s", m_out_path);
 		ImGui::SameLine();
 		if (ImGui::Button("...")) browse();
 
 		if (!m_satellite_map.pixels.empty() && ImGui::Button("Save")) save();
+		if (m_out_path[0] && ImGui::Button("Create entity")) createMapEntity();
 
 		ImGui::SameLine();
 		if (ImGui::Button("+")) zoom(1);
@@ -571,10 +913,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			}
 		}
 
-		double lat = double(tiley2lat(double(m_y + (1 << (m_size - 1))), m_zoom));
-		double width = 256 * (1 << m_size) * 156543.03 * cos(degreesToRadians(lat)) / (1 << m_zoom);
-
-		ImGui::Text("Width: %fkm", width / 1000);
 		ImGui::Text("Uses https://aws.amazon.com/public-datasets/terrain/");
 		ImGui::Text("http://s3.amazonaws.com/elevation-tiles-prod/terrarium/%d/%d/%d.png", m_zoom, m_x, m_y);
 		ImGui::Text("Sentinel-2 cloudless - https://s2maps.eu by EOX IT Services GmbH (Contains modified Copernicus Sentinel data 2016 & 2017)");
@@ -596,6 +934,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	int m_size = 1;
 	char m_out_path[MAX_PATH_LENGTH];
 	ImVec2 m_mouse_down_pos;
+	OSMParser m_osm_parser;
+	Array<Vec3> m_osm_lines;
+	Array<Vec3> m_osm_tris;
 };
 
 
