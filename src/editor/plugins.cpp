@@ -33,6 +33,8 @@
 #include <cmath>
 #include <cstdlib>
 #pragma comment(lib, "Ws2_32.lib")
+#pragma warning(disable : 4996)
+
 
 
 using namespace Lumix;
