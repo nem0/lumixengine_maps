@@ -1063,10 +1063,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		static i32 drops_count = 1024 * 1024;
 		static float power = 0.01f;
 
-		static float xx = 1;
-		ImGui::InputFloat("xx", &xx);
-
-
 		ImGuiEx::Label("Iterations");
 		ImGui::InputInt("##iters", &iterations);
 		ImGuiEx::Label("Drops count");
@@ -1160,7 +1156,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 						const u32 id = drop.x + drop.y * w;
 						const u32 il = low.x + low.y * w;
 						const float d = hmf[id] - hmf[il];
-						const float steep = clamp(d * d * xx, 0.f, 1.f);
+						const float steep = clamp(d * d, 0.f, 1.f);
 						hmf[id] -= d * power * steep;
 						hmf[il] += d * power * steep;
 						to->push(low);
