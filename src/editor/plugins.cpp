@@ -7,6 +7,7 @@
 #include "editor/world_editor.h"
 #include "editor/settings.h"
 #include "engine/atomic.h"
+#include "engine/crc32.h"
 #include "engine/engine.h"
 #include "engine/geometry.h"
 #include "engine/hash_map.h"
@@ -20,6 +21,8 @@
 #include "engine/sync.h"
 #include "engine/thread.h"
 #include "imgui/imgui.h"
+#include "renderer/material.h"
+#include "renderer/render_scene.h"
 #include "renderer/texture.h"
 #include "stb/stb_image.h"
 #include "pugixml/pugixml.hpp"
@@ -1055,7 +1058,122 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		return res;
 	}
 
-	
+	void erosionGUI() {
+		static i32 iterations = 1;
+		static i32 drops_count = 1024 * 1024;
+		static float power = 0.01f;
+
+		static float xx = 1;
+		ImGui::InputFloat("xx", &xx);
+
+
+		ImGuiEx::Label("Iterations");
+		ImGui::InputInt("##iters", &iterations);
+		ImGuiEx::Label("Drops count");
+		ImGui::InputInt("##drps_cnt", &drops_count);
+		ImGuiEx::Label("Power");
+		ImGui::SliderFloat("##pwr", &power, 0.f, 1.f);
+		WorldEditor& editor = m_app.getWorldEditor();
+		const Array<EntityRef>& entities = editor.getSelectedEntities();
+		if (entities.empty()) {
+			ImGui::TextUnformatted("No entity selected");
+			return;
+		}
+		Universe* universe = editor.getUniverse();
+		if (!universe->hasComponent(entities[0], TERRAIN_TYPE)) {
+			ImGui::TextUnformatted("Selected entity does not have terrain component");
+			return;
+		}
+		RenderScene* scene = (RenderScene*)universe->getScene(crc32("renderer"));
+		Material* mat = scene->getTerrainMaterial(entities[0]);
+		if (!mat->isReady()) {
+			ImGui::Text("Material %s not ready", mat->getPath().c_str());
+			return;
+		}
+		Texture* tex = mat->getTextureByName("Heightmap");
+		if (!tex) {
+			ImGui::TextUnformatted("Missing heightmap");
+			return;
+		}
+		if (!tex->isReady()) {
+			ImGui::TextUnformatted("Heightmap not ready");
+			return;
+		}
+		
+		if (ImGui::Button("Erode")) {
+			Array<IVec2> drops(m_app.getAllocator());
+			Array<IVec2> drops2(m_app.getAllocator());
+			Array<float> hmf(m_app.getAllocator());
+			
+			drops2.reserve(drops_count);
+			const u32 w = tex->width;
+			const u32 h = tex->height;
+			hmf.resize(w * h);
+			u16* hm = (u16*)tex->data.getMutableData();
+			ASSERT(tex->data.getPos() == w * h * 2);
+			for (u32 i = 0; i < w * h; ++i) {
+				hmf[i] = hm[i];
+			}
+
+			for (i32 iter = 0; iter < iterations; ++iter) {
+				drops.resize(drops_count);
+				drops2.clear();
+				for (IVec2& drop : drops) {
+					drop.x = rand(0, w - 1);
+					drop.y = rand(0, h - 1);
+				}
+
+				Array<IVec2>* from = &drops;
+				Array<IVec2>* to = &drops2;
+			
+				auto find_low = [&](const IVec2 p){
+					const IVec2 offsets[] = {
+						IVec2(-1, -1),
+						IVec2(-1, 0),
+						IVec2(-1, 1),
+						IVec2(0, -1),
+						IVec2(0, 1),
+						IVec2(1, -1),
+						IVec2(1, 0),
+						IVec2(1, 1)
+					};
+
+					float min = hmf[p.x + p.y * w];
+					IVec2 min_p = p;
+					for (const IVec2& o : offsets){
+						IVec2 tmp = p + o;
+						if (tmp.x < 0 || tmp.y < 0 || tmp.x >= (i32)w || tmp.y >= (i32)h) continue;
+
+						if (min > hmf[tmp.x + tmp.y * w]) {
+							min = hmf[tmp.x + tmp.y * w];
+							min_p = tmp;
+						}
+					}
+					return min_p;
+				};
+
+				while (!from->empty()) {
+					const IVec2 drop = from->back();
+					from->pop();
+					const IVec2 low = find_low(drop);
+					if (low != drop) {
+						const u32 id = drop.x + drop.y * w;
+						const u32 il = low.x + low.y * w;
+						const float d = hmf[id] - hmf[il];
+						const float steep = clamp(d * d * xx, 0.f, 1.f);
+						hmf[id] -= d * power * steep;
+						hmf[il] += d * power * steep;
+						to->push(low);
+					}
+				}
+			}
+			for (u32 i = 0; i < w * h; ++i) {
+				hm[i] = (u16)hmf[i];
+			}
+
+			tex->onDataUpdated(0, 0, w, h);
+		}
+	}
 
 	void onWindowGUI() override {
 		while (!m_queue.empty() && m_in_progress.size() < 8) {
@@ -1080,6 +1198,10 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			}
 			if (ImGui::BeginTabItem("OSM")) {
 				OSMGUI();
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("Erosion")) {
+				erosionGUI();
 				ImGui::EndTabItem();
 			}
 			ImGui::EndTabBar();
