@@ -1106,7 +1106,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			const u32 h = tex->height;
 			hmf.resize(w * h);
 			u16* hm = (u16*)tex->data.getMutableData();
-			ASSERT(tex->data.getPos() == w * h * 2);
+			ASSERT(tex->data.size() == w * h * 2);
 			for (u32 i = 0; i < w * h; ++i) {
 				hmf[i] = hm[i];
 			}
