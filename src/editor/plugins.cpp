@@ -51,6 +51,11 @@ using namespace Lumix;
 namespace
 {
 
+struct BoundingBox {
+	DVec3 center;
+	float yaw;
+};
+
 struct DVec2 {
 	double x, y;
 	DVec2 operator -(const DVec2& rhs) const { return {x - rhs.x, y - rhs.y}; }
@@ -240,12 +245,23 @@ struct OSMParser {
 		return true;
 	}
 
-	void createArea(const pugi::xml_node& way, u32 abgr, Ref<Array<UniverseView::Vertex>> out, IAllocator& allocator) const {
+	BoundingBox createArea(const pugi::xml_node& way, u32 abgr, Ref<Array<UniverseView::Vertex>> out, IAllocator& allocator) const {
 		Array<DVec3> polygon(allocator);
 		getWay(way, Ref(polygon));
-		if (polygon.size() < 3) return;
+		if (polygon.size() < 3) return {};
 
 		polygon.pop();
+
+		BoundingBox res;
+		res.center = DVec3(0);
+		for (i32 i = 0, c = polygon.size(); i < c; ++i) {
+			res.center += polygon[i];
+		}
+		res.center /= polygon.size();
+		Vec3 dir = (polygon[0] - polygon[1]).toFloat();
+		dir.y = 0;
+		dir.normalize();
+		res.yaw = atan2(dir.x, dir.z);
 
 		i32 max = 0;
 		i32 s = polygon.size();
@@ -280,6 +296,7 @@ struct OSMParser {
 				}
 			}
 		}
+		return res;
 /*		
 		pugi::xml_node nd_ref = way.first_child();
 		DVec3 pos;
@@ -842,6 +859,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		editor.setProperty(TERRAIN_TYPE, "", -1, "XZ scale", Span(&e, 1), scale);
 	}
 
+	bool createHeightmap(const char* material_path, int size)
+	{
+		
+		return true;
+	}
+
 	void save()
 	{
 		ASSERT(m_out_path[0]);
@@ -940,29 +963,79 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		StaticString<MAX_PATH_LENGTH> tga_path(file_info.m_dir, "/", file_info.m_basename, ".tga");
 		ri->saveTexture(editor.getEngine(), tga_path, imagery.begin(), map_size, map_size, true);
 
+		const StaticString<MAX_PATH_LENGTH> albedo_path(file_info.m_dir, "albedo_detail.ltc");
+		const StaticString<MAX_PATH_LENGTH> normal_path(file_info.m_dir, "normal_detail.ltc");
+		const StaticString<MAX_PATH_LENGTH> splatmap_meta_path(file_info.m_dir, file_info.m_basename, ".tga.meta");
+		
+		if (!file.open(splatmap_meta_path)) {
+			logError("Editor") << "Failed to create " << splatmap_meta_path;
+		}
+		else {
+			file << "filter = \"point\"";
+			file.close();
+		}
+
+		if (!file.open(albedo_path)) {
+			logError("Editor") << "Failed to create " << albedo_path;
+		}
+		else {
+			file << R"#(
+				layer {
+					red = { "/textures/common/red.tga", 0 },
+					green = { "/textures/common/red.tga", 1 },
+					blue = { "/textures/common/red.tga", 2 },
+					alpha = { "/textures/common/red.tga", 3 }
+				}
+				layer {
+					red = { "/textures/common/green.tga", 0 },
+					green = { "/textures/common/green.tga", 1 },
+					blue = { "/textures/common/green.tga", 2 },
+					alpha = { "/textures/common/green.tga", 3 }
+				}
+			)#";
+			file.close();
+		}
+
+		if (!file.open(normal_path)) {
+			logError("Editor") << "Failed to create " << normal_path;
+		}
+		else {
+			file << R"#(
+				layer {
+					red = { "/textures/common/default_normal.tga", 0 },
+					green = { "/textures/common/default_normal.tga", 1 },
+					blue = { "/textures/common/default_normal.tga", 2 },
+					alpha = { "/textures/common/default_normal.tga", 3 }
+				}
+				layer {
+					red = { "/textures/common/default_normal.tga", 0 },
+					green = { "/textures/common/default_normal.tga", 1 },
+					blue = { "/textures/common/default_normal.tga", 2 },
+					alpha = { "/textures/common/default_normal.tga", 3 }
+				}
+			)#";
+			file.close();
+		}
+
 		StaticString<MAX_PATH_LENGTH> mat_path(file_info.m_dir, "/", file_info.m_basename, ".mat");
 		OS::OutputFile mat_file;
 		if (mat_file.open(mat_path)) {
 			mat_file << R"#(
-				shader "pipelines/terrain.shd"
-				backface_culling(true)
-				layer "default"
-				emission(0.000000)
-				metallic(0.000000)
-				roughness(1.000000)
-				alpha_ref(0.300000)
-				defines {}
-				color { 1.000000, 1.000000, 1.000000, 1.000000 }
-				texture ")#" << file_info.m_basename << R"#(.raw"
-				texture ""
-				texture ""
-				texture ""
+				shader "/pipelines/terrain.shd"
+				texture ")#";
+			mat_file << file_info.m_basename;
+			mat_file << R"#(.raw"
+				texture "albedo_detail.ltc"
+				texture "normal_detail.ltc"
+				texture "/textures/common/white.tga"
 				texture ")#" << file_info.m_basename << R"#(.tga"
-				texture ""
-				layer "default"
-				uniform("Detail distance", 0.000000)
-				uniform("Detail scale", 0.000000)
+				uniform("Detail distance", 50.000000)
+				uniform("Detail scale", 1.000000)
+				uniform("Noise UV scale", 0.200000)
+				uniform("Detail diffusion", 0.500000)
+				uniform("Detail power", 16.000000)
 			)#";
+
 			mat_file.close();
 		}
 
@@ -1424,9 +1497,15 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			
 			if (prefab[0]) ImGui::SameLine();
 			if (ImGui::Button("Show")) {
+				const ComponentType model_instance_type = Reflection::getComponentType("model_instance");
 				for (pugi::xml_node& w : m_osm_parser.m_ways) {
 					if (!OSMParser::hasTag(w, tag_key, tag_value)) continue;
-					m_osm_parser.createArea(w, randomColor().abgr(), Ref(m_osm_tris), m_app.getAllocator());
+					const BoundingBox bb = m_osm_parser.createArea(w, randomColor().abgr(), Ref(m_osm_tris), m_app.getAllocator());
+					//const EntityRef e = editor.addEntity();
+					//const Quat rot(Vec3(0, 1, 0), bb.yaw);
+					//editor.setEntitiesPositionsAndRotations(&e, &bb.center, &rot, 1);
+					//editor.addComponent(Span(&e, 1), model_instance_type);
+					//editor.setProperty(model_instance_type, "", -1, "Source", Span(&e, 1), Path("models/shapes/cube.fbx"));
 				}
 			}
 
