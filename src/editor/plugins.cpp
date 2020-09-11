@@ -23,6 +23,7 @@
 #include "imgui/imgui.h"
 #include "renderer/material.h"
 #include "renderer/render_scene.h"
+#include "renderer/terrain.h"
 #include "renderer/texture.h"
 #include "stb/stb_image.h"
 #include "pugixml/pugixml.hpp"
@@ -245,7 +246,7 @@ struct OSMParser {
 		return true;
 	}
 
-	BoundingBox createArea(const pugi::xml_node& way, u32 abgr, Ref<Array<UniverseView::Vertex>> out, IAllocator& allocator) const {
+	BoundingBox createAreaMesh(const pugi::xml_node& way, u32 abgr, Ref<Array<UniverseView::Vertex>> out, IAllocator& allocator) const {
 		Array<DVec3> polygon(allocator);
 		getWay(way, Ref(polygon));
 		if (polygon.size() < 3) return {};
@@ -455,6 +456,17 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		MapsTask* imagery_task = nullptr;
 	};
 
+	struct Area {
+		Area(IAllocator& allocator) : prefabs(allocator) {}
+
+		u16 grass = 0xffff;
+		u8 ground = 0xff;
+		bool inverted = false;
+		float spacing = 1;
+		StaticString<64> key = "";
+		StaticString<64> value = "";
+		Array<StaticString<MAX_PATH_LENGTH>> prefabs;
+	};
 
 	struct MapsTask : public Thread
 	{
@@ -639,6 +651,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		, m_osm_parser(app)
 		, m_osm_lines(app.getAllocator())
 		, m_osm_tris(app.getAllocator())
+		, m_areas(app.getAllocator())
 	{
 		#ifdef _WIN32
 			WORD sockVer;
@@ -1369,6 +1382,159 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 	}
 
+	const Terrain* getSelectedTerrain() const {
+		WorldEditor& editor = m_app.getWorldEditor();
+		Universe* universe = m_app.getWorldEditor().getUniverse();
+		const Array<EntityRef>& selected_entities = editor.getSelectedEntities();
+		
+		if (selected_entities.size() != 1) return nullptr;
+		if (!universe->hasComponent(selected_entities[0], TERRAIN_TYPE)) return nullptr;
+
+		RenderScene* scene = (RenderScene*)universe->getScene(crc32("renderer"));
+		return scene->getTerrain(selected_entities[0]);
+	}
+	
+	void rasterGround(const Area& area, const Array<u8>& mask, u32 mask_size) {
+		if (area.ground == 0xff) return;
+		
+		const Terrain* terrain = getSelectedTerrain();
+		if (!terrain) return;
+		Texture* splatmap = terrain->getSplatmap();
+		if (!splatmap) {
+			logWarning("Maps") << "missing splatmap";
+			return;
+		}
+		if(!splatmap->isReady()) {
+			logWarning("Maps") << "splatmap not ready";
+			return;
+		}
+
+		auto is_masked = [&](u32 x, u32 y){
+			u32 i = u32(x / float(splatmap->width) * mask_size + 0.5f);
+			u32 j = u32(y / float(splatmap->height) * mask_size + 0.5f);
+			i = clamp(i, 0, mask_size - 1);
+			j = clamp(j, 0, mask_size - 1);
+			
+			return mask[i + j * mask_size] != 0;
+		};
+
+		u8* data = splatmap->getData();
+		for (u32 y = 0; y < splatmap->height; ++y) {
+			for (u32 x = 0; x < splatmap->width; ++x) {
+				if (is_masked(x, y)) {
+					u8* pixel = data + (x + (splatmap->height - y - 1) * splatmap->width) * 4;
+					pixel[0] = area.ground;
+					pixel[1] = area.ground;
+				}
+			}
+		}
+		splatmap->onDataUpdated(0, 0, splatmap->width, splatmap->height);	
+	}
+
+	void rasterGrass(const Area& area, const Array<u8>& mask, u32 mask_size) {
+		if (!area.grass) return;
+		
+		const Terrain* terrain = getSelectedTerrain();
+		if (!terrain) return;
+		Texture* splatmap = terrain->getSplatmap();
+		if (!splatmap) {
+			logWarning("Maps") << "missing splatmap";
+			return;
+		}
+		if(!splatmap->isReady()) {
+			logWarning("Maps") << "splatmap not ready";
+			return;
+		}
+
+		auto is_masked = [&](u32 x, u32 y){
+			u32 i = u32(x / float(splatmap->width) * mask_size + 0.5f);
+			u32 j = u32(y / float(splatmap->height) * mask_size + 0.5f);
+			i = clamp(i, 0, mask_size - 1);
+			j = clamp(j, 0, mask_size - 1);
+			
+			return mask[i + j * mask_size] != 0;
+		};
+
+		u8* data = splatmap->getData();
+		for (u32 y = 0; y < splatmap->height; ++y) {
+			for (u32 x = 0; x < splatmap->width; ++x) {
+				if (is_masked(x, y)) {
+					u8* pixel = data + (x + (splatmap->height - y - 1) * splatmap->width) * 4;
+					memcpy(pixel + 2, &area.grass, sizeof(area.grass));
+				}
+			}
+		}
+		splatmap->onDataUpdated(0, 0, splatmap->width, splatmap->height);
+	}
+
+	void createArea(const Area& area)
+	{
+		Array<DVec3> polygon(m_app.getAllocator());
+		Array<IVec2> points(m_app.getAllocator());
+		Array<u8> bitmap(m_app.getAllocator());
+		const u32 size = 256 * (1 << m_size);
+		bitmap.resize(size * size);
+		memset(bitmap.begin(), 0, bitmap.byte_size());
+		const DVec2 from = {m_osm_parser.m_min_lat, m_osm_parser.m_min_lon};
+		const DVec2 range = {m_osm_parser.m_lat_range, m_osm_parser.m_lon_range};
+				
+		WorldEditor& editor = m_app.getWorldEditor();
+		Universe* universe = m_app.getWorldEditor().getUniverse();
+		
+		Array<Array<Transform>> transforms(m_app.getAllocator());
+		
+		for (const auto& prefab : area.prefabs) {
+			transforms.emplace(m_app.getAllocator());
+		}
+		
+		for (pugi::xml_node& w : m_osm_parser.m_ways) {
+			if (!OSMParser::hasTag(w, area.key, area.value)) continue;
+
+			polygon.clear();
+			points.clear();
+			m_osm_parser.getWay(w, Ref(polygon));
+
+			for (const DVec3 p : polygon) {
+				DVec2 tmp;
+				tmp.x = p.x  / m_osm_parser.m_scale * (float)size;
+				tmp.y = (1 - p.z  / m_osm_parser.m_scale) * (float)size;
+				points.push(IVec2((i32)tmp.x, (i32)tmp.y));
+			}
+			raster(points, size, size, Ref(bitmap));
+		}
+
+		rasterGrass(area, bitmap, size);
+		rasterGround(area, bitmap, size);
+
+		const i32 prefabs_count = area.prefabs.size();
+		if (prefabs_count == 0) return;
+
+		RenderInterface* ri = m_app.getRenderInterface();
+		const u8 ref = area.inverted ? 0 : 0xff;
+		for (float y = 0; y < size; y += area.spacing) {
+			for (float x = 0; x < size; x += area.spacing) {
+				if (bitmap[i32(x) + i32(y) * size] == ref) {
+					DVec3 pos;
+					pos.x = (x + area.spacing * randFloat() * 0.9f - 0.45f) / (float)size * m_osm_parser.m_scale;
+					pos.y = 9'001;
+					pos.z = (1 - (y + area.spacing * randFloat() * 0.9f - 0.45f) / (float)size) * m_osm_parser.m_scale;
+
+					auto hit = ri->castRay(*universe, pos, Vec3(0, -1, 0), INVALID_ENTITY);
+					if (hit.is_hit) {
+						pos += Vec3(0, -hit.t, 0);
+					}
+					
+					transforms[rand(0, prefabs_count - 1)].push({pos, Quat(Vec3(0, 1, 0), randFloat() * 2 * PI), 1});
+				}
+			}
+		}
+		for (const auto& prefab : area.prefabs) {
+			PrefabResource* res = editor.getEngine().getResourceManager().load<PrefabResource>(Path(prefab));
+			const u32 i = u32(&prefab - area.prefabs.begin());
+			editor.getPrefabSystem().instantiatePrefabs(*res, transforms[i]);
+			res->getResourceManager().unload(*res);
+		}
+	}
 
 	void OSMGUI() {
 		double bottom = double(tiley2lat(double(m_y - m_offset.y / 256.0), m_zoom));
@@ -1420,93 +1586,97 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		
 		if (ImGui::CollapsingHeader("Area")) {
 			ImGui::PushID("Area");
-			ImGuiEx::Label("Prefab");
-			static char prefab[MAX_PATH_LENGTH] = ""; 
-			m_app.getAssetBrowser().resourceInput("##area_prefab", Span(prefab), PrefabResource::TYPE);
-			
-			static char tag_key[64] = "";
-			static char tag_value[64] = "";
-			const char* values[] = { 
-				"forest\0landuse", 
-				"residential\0landuse",
-				"industrial\0landuse",
-				"farmland\0landuse",
-				"farmyard\0landuse",
-				"cemetery\0landuse",
-				"reservoir\0landuse",
-				"water\0natural",
-				"\0building"
-			};
-			tagInput(Span(tag_key), Span(tag_value), Span(values));
-			static float spacing = 1.f;
-			ImGuiEx::Label("Spacing");
-			ImGui::DragFloat("##dens", &spacing, 0.01f);
-			ImGuiEx::Label("Invert create");
-			static bool invert_create = false;
-			ImGui::Checkbox("##inv", &invert_create);
-
-			if (prefab[0] && ImGui::Button("Create")) {
-				Array<DVec3> polygon(m_app.getAllocator());
-				Array<IVec2> points(m_app.getAllocator());
-				Array<u8> bitmap(m_app.getAllocator());
-				const u32 size = 256 * (1 << m_size);
-				bitmap.resize(size * size);
-				memset(bitmap.begin(), 0, bitmap.byte_size());
-				const DVec2 from = {m_osm_parser.m_min_lat, m_osm_parser.m_min_lon};
-				const DVec2 range = {m_osm_parser.m_lat_range, m_osm_parser.m_lon_range};
-				
-				PrefabResource* prefab_res = editor.getEngine().getResourceManager().load<PrefabResource>(Path(prefab));
-				Universe* universe = m_app.getWorldEditor().getUniverse();
-				for (pugi::xml_node& w : m_osm_parser.m_ways) {
-					if (!OSMParser::hasTag(w, tag_key, tag_value)) continue;
-
-					polygon.clear();
-					points.clear();
-					m_osm_parser.getWay(w, Ref(polygon));
-
-					for (const DVec3 p : polygon) {
-						DVec2 tmp;
-						tmp.x = p.x  / m_osm_parser.m_scale * (float)size;
-						tmp.y = (1 - p.z  / m_osm_parser.m_scale) * (float)size;
-						points.push(IVec2((i32)tmp.x, (i32)tmp.y));
-					}
-					raster(points, size, size, Ref(bitmap));
+			if (!m_areas.empty() && ImGui::Button("Create all")) {
+				for (const Area& area : m_areas) {
+					createArea(area);
 				}
+			}
+			if (!m_areas.empty()) ImGui::SameLine();
+			if (ImGui::Button("Reset visualization")) {
+				m_osm_tris.clear();
+				m_osm_lines.clear();
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Add area")) m_areas.emplace(m_app.getAllocator());
+			for (Area& area : m_areas) {
+				if (!ImGui::TreeNodeEx(&area, 0, "%d", int(&area - m_areas.begin()))) continue;
 
-				RenderInterface* ri = m_app.getRenderInterface();
-				const u8 ref = invert_create ? 0 : 0xff;
-				Array<Transform> trs(m_app.getAllocator());
-				for (float y = 0; y < size; y += spacing) {
-					for (float x = 0; x < size; x += spacing) {
-						if (bitmap[i32(x) + i32(y) * size] == ref) {
-							DVec3 pos;
-							pos.x = (x + spacing * randFloat() * 0.9f - 0.45f) / (float)size * m_osm_parser.m_scale;
-							pos.y = 9'001;
-							pos.z = (1 - (y + spacing * randFloat() * 0.9f - 0.45f) / (float)size) * m_osm_parser.m_scale;
+				const char* values[] = { 
+					"forest\0landuse", 
+					"residential\0landuse",
+					"industrial\0landuse",
+					"farmland\0landuse",
+					"farmyard\0landuse",
+					"cemetery\0landuse",
+					"reservoir\0landuse",
+					"water\0natural",
+					"\0building"
+				};
+				tagInput(Span(area.key.data), Span(area.value.data), Span(values));
+				ImGuiEx::Label("Spacing");
+				ImGui::DragFloat("##dens", &area.spacing, 0.01f);
+				ImGuiEx::Label("Invert create");
+				ImGui::Checkbox("##inv", &area.inverted);
 
-							auto hit = ri->castRay(*universe, pos, Vec3(0, -1, 0), INVALID_ENTITY);
-							if (hit.is_hit) {
-								pos += Vec3(0, -hit.t, 0);
-							}
-							trs.push({pos, Quat(Vec3(0, 1, 0), randFloat() * 2 * PI), 1});
+				const Terrain* terrain = getSelectedTerrain();
+				if (terrain) {
+					ImGuiEx::Label("Grass");
+					for (i32 i = 0; i < terrain->getGrassTypeCount(); ++i) {
+						bool b = area.grass & (1 << i);
+						if (i > 0) ImGui::SameLine();
+						if (ImGui::Checkbox(StaticString<10>("##gra", i), &b)) {
+							if (b) area.grass |= 1 << i;
+							else area.grass &= ~(1 << i);
 						}
 					}
+					ImGuiEx::Label("Ground");
+					const Texture* albedo = terrain->getAlbedomap();
+					if (ImGui::BeginCombo("##ground",area.ground == 0xff ? "Do not use" : StaticString<32>("", area.ground).data)) {
+						if (ImGui::Selectable("Do not use")) area.ground = 0xff;
+						
+						for (u32 i = 0; i < (albedo ? albedo->layers : 0); ++i) {
+							if (ImGui::Selectable(StaticString<8>("", i))) {
+								area.ground = i;
+							}
+						}
+						ImGui::EndCombo();
+					}
 				}
-				editor.getPrefabSystem().instantiatePrefabs(*prefab_res, trs);
-			}
-			
-			if (prefab[0]) ImGui::SameLine();
-			if (ImGui::Button("Show")) {
-				const ComponentType model_instance_type = Reflection::getComponentType("model_instance");
-				for (pugi::xml_node& w : m_osm_parser.m_ways) {
-					if (!OSMParser::hasTag(w, tag_key, tag_value)) continue;
-					const BoundingBox bb = m_osm_parser.createArea(w, randomColor().abgr(), Ref(m_osm_tris), m_app.getAllocator());
-					//const EntityRef e = editor.addEntity();
-					//const Quat rot(Vec3(0, 1, 0), bb.yaw);
-					//editor.setEntitiesPositionsAndRotations(&e, &bb.center, &rot, 1);
-					//editor.addComponent(Span(&e, 1), model_instance_type);
-					//editor.setProperty(model_instance_type, "", -1, "Source", Span(&e, 1), Path("models/shapes/cube.fbx"));
+
+				for (StaticString<MAX_PATH_LENGTH>& path : area.prefabs) {
+					ImGuiEx::Label("Prefab");
+					const u32 idx = u32(&path - area.prefabs.begin());
+					const StaticString<MAX_PATH_LENGTH> id("##a", idx);
+					ImGui::BeginGroup();
+					if (ImGui::Button(StaticString<64>(ICON_FA_TRASH, "##r", idx))) {
+						area.prefabs.erase(idx);
+						ImGui::EndGroup();
+						break;
+					}
+					ImGui::SameLine();
+					m_app.getAssetBrowser().resourceInput(id, Span(path.data), PrefabResource::TYPE);
+					ImGui::EndGroup();
 				}
+
+				if (ImGui::Button("Add prefab")) area.prefabs.emplace() = "";
+				ImGui::SameLine();
+				if (ImGui::Button("Visualize")) {
+					const ComponentType model_instance_type = Reflection::getComponentType("model_instance");
+					for (pugi::xml_node& w : m_osm_parser.m_ways) {
+						if (!OSMParser::hasTag(w, area.key, area.value)) continue;
+						const BoundingBox bb = m_osm_parser.createAreaMesh(w, randomColor().abgr(), Ref(m_osm_tris), m_app.getAllocator());
+						//const EntityRef e = editor.addEntity();
+						//const Quat rot(Vec3(0, 1, 0), bb.yaw);
+						//editor.setEntitiesPositionsAndRotations(&e, &bb.center, &rot, 1);
+						//editor.addComponent(Span(&e, 1), model_instance_type);
+						//editor.setProperty(model_instance_type, "", -1, "Source", Span(&e, 1), Path("models/shapes/cube.fbx"));
+					}
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Create")) {
+					createArea(area);
+				}
+				ImGui::TreePop();
 			}
 
 			ImGui::PopID();
@@ -1573,7 +1743,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 					m_osm_parser.createPolyline(polyline, randomColor().abgr(), Ref(m_osm_tris));
 				}
 			}
-
 			ImGui::PopID();
 		}
 	}
@@ -1709,9 +1878,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		ImGui::Text("Sentinel-2 cloudless - https://s2maps.eu by EOX IT Services GmbH (Contains modified Copernicus Sentinel data 2016 & 2017)");
 	}
 
-
 	bool m_show_hm = false;
 	StudioApp& m_app;
+	Array<Area> m_areas;
 	Array<TileData*> m_tiles;
 	Array<TileData*> m_cache;
 	Array<MapsTask*> m_queue;
