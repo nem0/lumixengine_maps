@@ -660,10 +660,10 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			if (WSAStartup(sockVer, &wsaData) != 0) logError("Maps") << "Failed to init winsock.";
 		#endif
 
-		Action* action = LUMIX_NEW(app.getAllocator(), Action)("Maps", "maps", "maps");
-		action->func.bind<&MapsPlugin::toggleOpen>(this);
-		action->is_selected.bind<&MapsPlugin::isOpen>(this);
-		app.addWindowAction(action);
+		m_toggle_ui.init("Maps", "maps", "maps", "", true);
+		m_toggle_ui.func.bind<&MapsPlugin::toggleOpen>(this);
+		m_toggle_ui.is_selected.bind<&MapsPlugin::isOpen>(this);
+		app.addWindowAction(&m_toggle_ui);
 		m_out_path[0] = '\0';
 	}
 	
@@ -677,6 +677,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	~MapsPlugin()
 	{
+		m_app.removeAction(&m_toggle_ui);
 		finishAllTasks();
 		#ifdef _WIN32
 			WSACleanup();
@@ -1532,7 +1533,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			PrefabResource* res = editor.getEngine().getResourceManager().load<PrefabResource>(Path(prefab));
 			const u32 i = u32(&prefab - area.prefabs.begin());
 			editor.getPrefabSystem().instantiatePrefabs(*res, transforms[i]);
-			res->getResourceManager().unload(*res);
+			res->decRefCount();
 		}
 	}
 
@@ -1900,6 +1901,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	OSMParser m_osm_parser;
 	Array<Vec3> m_osm_lines;
 	Array<UniverseView::Vertex> m_osm_tris;
+	Action m_toggle_ui;
 };
 
 
