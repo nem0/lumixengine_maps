@@ -98,11 +98,9 @@ double tiley2lat(double y, int z) {
 	return 180.0 / PI * atan(0.5 * (exp(n) - exp(-n)));
 }
 
-
 constexpr int TILE_SIZE = 256;
 constexpr int MAX_ZOOM = 18;
 constexpr float MAP_UI_SIZE = 512;
-
 
 struct OSMParser {
 	OSMParser(StudioApp& app)
@@ -425,7 +423,6 @@ struct OSMParser {
 	float m_scale = 1;
 };
 
-
 struct MapsPlugin final : public StudioApp::GUIPlugin
 {
 	struct MapsTask;
@@ -683,6 +680,64 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			WSACleanup();
 		#endif
 		clear();
+	}
+
+	void saveAreas() {
+		FileSystem& fs = m_app.getWorldEditor().getEngine().getFileSystem();
+		const StaticString<MAX_PATH_LENGTH> path(fs.getBasePath(), "_maps_areas.dat");
+
+		OS::OutputFile file;
+		if (file.open(path)) {
+			file.write(m_areas.size());
+			for (const Area& area : m_areas) {
+				file.write(area.grass);
+				file.write(area.ground);
+				file.write(area.inverted);
+				file.write(area.spacing);
+				file.write(area.key);
+				file.write(area.value);
+				file.write(area.prefabs.size());
+				for (const StaticString<MAX_PATH_LENGTH>& p : area.prefabs) {
+					file.write(p);
+				}
+			}
+			file.close();
+		}
+		else {
+			logError("Maps") << "Failed to save " << path;
+		}
+	}
+
+	void loadAreas() {
+		m_areas.clear();
+
+		FileSystem& fs = m_app.getWorldEditor().getEngine().getFileSystem();
+		const StaticString<MAX_PATH_LENGTH> path(fs.getBasePath(), "_maps_areas.dat");
+
+		OS::InputFile file;
+		if (file.open(path)) {
+			i32 count;
+			file.read(count);
+			for (i32 i = 0; i < count; ++i) {
+				Area& area = m_areas.emplace(m_app.getAllocator());
+				file.read(area.grass);
+				file.read(area.ground);
+				file.read(area.inverted);
+				file.read(area.spacing);
+				file.read(area.key);
+				file.read(area.value);
+				i32 prefabs_count;
+				file.read(prefabs_count);
+				for (i32 j = 0; j < prefabs_count; ++j) {
+					StaticString<MAX_PATH_LENGTH>& p = area.prefabs.emplace();
+					file.read(p);
+				}
+			}
+			file.close();
+		}
+		else {
+			logError("Maps") << "Failed to load " << path;
+		}
 	}
 
 	void parseOSMData(double left, double bottom, double right, double top, float scale) {
@@ -1586,6 +1641,10 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		WorldEditor& editor = m_app.getWorldEditor();
 		
 		if (ImGui::CollapsingHeader("Area")) {
+			if (ImGui::Button("Save areas")) saveAreas();
+			ImGui::SameLine();
+			if (ImGui::Button("Load areas")) loadAreas();
+
 			ImGui::PushID("Area");
 			if (!m_areas.empty() && ImGui::Button("Create all")) {
 				for (const Area& area : m_areas) {
