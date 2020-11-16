@@ -596,16 +596,20 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		void saveToCache() {
 			FileSystem& fs = app->getWorldEditor().getEngine().getFileSystem();
 			const StaticString<MAX_PATH_LENGTH> dir(fs.getBasePath(), "_maps_cache");
-			OS::makePath(dir);
+			if (!OS::makePath(dir)) {
+				logError("Could not create", dir);
+			}
 			const StaticString<MAX_PATH_LENGTH> path(dir, "/", is_heightmap ? "hm" : "im", tile.loc.z, "_", tile.loc.x, "_", tile.loc.y);
 			OS::OutputFile file;
 			if (file.open(path)) {
 				u8* out = is_heightmap ? (u8*)tile.hm_data.begin() : (u8*)tile.imagery_data.begin();
-				file.write(out, TILE_SIZE * TILE_SIZE * sizeof(u32));
+				if (!file.write(out, TILE_SIZE * TILE_SIZE * sizeof(u32))) {
+					logError("Could not write ", path);
+				}
 				file.close();
 			}
 			else {
-				logError("Maps") << "Fail to create " << path;
+				logError("Fail to create ", path);
 			}
 		}
 
@@ -654,7 +658,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			WORD sockVer;
 			WSADATA wsaData;
 			sockVer = 2 | (2 << 8);
-			if (WSAStartup(sockVer, &wsaData) != 0) logError("Maps") << "Failed to init winsock.";
+			if (WSAStartup(sockVer, &wsaData) != 0) logError("Failed to init winsock.");
 		#endif
 
 		m_toggle_ui.init("Maps", "maps", "maps", "", true);
@@ -704,7 +708,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			file.close();
 		}
 		else {
-			logError("Maps") << "Failed to save " << path;
+			logError("Failed to save ", path);
 		}
 	}
 
@@ -736,7 +740,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			file.close();
 		}
 		else {
-			logError("Maps") << "Failed to load " << path;
+			logError("Failed to load ", path);
 		}
 	}
 
@@ -918,7 +922,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		char rel_mat_path[MAX_PATH_LENGTH];
 		
 		if (!editor.getEngine().getFileSystem().makeRelative(Span(rel_mat_path), mat_path)) {
-			logError("Maps") << "Can not load " << mat_path << " because it's not in root directory.";
+			logError("Can not load ", mat_path, " because it's not in root directory.");
 		}
 		editor.setProperty(TERRAIN_TYPE, "", -1, "Material", Span(&e, 1), Path(rel_mat_path));
 
@@ -1013,7 +1017,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		IAllocator& allocator = editor.getAllocator();
 		OS::OutputFile file;
 		if (!file.open(m_out_path)) {
-			logError("Maps") << "Failed to save " << m_out_path;
+			logError("Failed to save ", m_out_path);
 			return;
 		}
 		RawTextureHeader header;
@@ -1023,8 +1027,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		header.is_array = false;
 		header.width = map_size;
 		header.height = map_size;
-		file.write(&header, sizeof(header));
-		file.write(&raw[0], raw.byte_size());
+		bool success = file.write(&header, sizeof(header));
+		success = success || file.write(&raw[0], raw.byte_size());
+		if (!success) {
+			logError("Could not write ", m_out_path);
+		}
 		file.close();
 
 		RenderInterface* ri = m_app.getRenderInterface();
@@ -1037,7 +1044,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		const StaticString<MAX_PATH_LENGTH> splatmap_meta_path(file_info.m_dir, file_info.m_basename, ".tga.meta");
 		
 		if (!file.open(splatmap_meta_path)) {
-			logError("Editor") << "Failed to create " << splatmap_meta_path;
+			logError("Failed to create ", splatmap_meta_path);
 		}
 		else {
 			file << "filter = \"point\"";
@@ -1045,7 +1052,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		if (!file.open(albedo_path)) {
-			logError("Editor") << "Failed to create " << albedo_path;
+			logError("Failed to create ", albedo_path);
 		}
 		else {
 			file << R"#(
@@ -1066,7 +1073,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		if (!file.open(normal_path)) {
-			logError("Editor") << "Failed to create " << normal_path;
+			logError("Failed to create ", normal_path);
 		}
 		else {
 			file << R"#(
@@ -1457,11 +1464,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		if (!terrain) return;
 		Texture* splatmap = terrain->getSplatmap();
 		if (!splatmap) {
-			logWarning("Maps") << "missing splatmap";
+			logWarning("Missing splatmap");
 			return;
 		}
 		if(!splatmap->isReady()) {
-			logWarning("Maps") << "splatmap not ready";
+			logWarning("Splatmap not ready");
 			return;
 		}
 
@@ -1494,11 +1501,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		if (!terrain) return;
 		Texture* splatmap = terrain->getSplatmap();
 		if (!splatmap) {
-			logWarning("Maps") << "missing splatmap";
+			logWarning("Missing splatmap");
 			return;
 		}
 		if(!splatmap->isReady()) {
-			logWarning("Maps") << "splatmap not ready";
+			logWarning("Splatmap not ready");
 			return;
 		}
 
