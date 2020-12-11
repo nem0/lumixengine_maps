@@ -77,8 +77,8 @@ struct TileLoc {
 	int x, y, z;
 };
 
-static const ComponentType MODEL_INSTANCE_TYPE = Reflection::getComponentType("model_instance");
-static const ComponentType TERRAIN_TYPE = Reflection::getComponentType("terrain");
+static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
+static const ComponentType TERRAIN_TYPE = reflection::getComponentType("terrain");
 
 double long2tilex(double long lon, int z) {
 	return (lon + 180) * (1 << z) / 360.0;
@@ -582,7 +582,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			FileSystem& fs = app->getWorldEditor().getEngine().getFileSystem();
 			const StaticString<MAX_PATH_LENGTH> path(fs.getBasePath(), "_maps_cache", "/", is_heightmap ? "hm" : "im", tile.loc.z, "_", tile.loc.x, "_", tile.loc.y);
 			
-			OS::InputFile file;
+			os::InputFile file;
 			if (file.open(path)) {
 				u8* out = is_heightmap ? (u8*)tile.hm_data.begin() : (u8*)tile.imagery_data.begin();
 				const bool res = file.read(out, TILE_SIZE * TILE_SIZE * sizeof(u32));
@@ -596,11 +596,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		void saveToCache() {
 			FileSystem& fs = app->getWorldEditor().getEngine().getFileSystem();
 			const StaticString<MAX_PATH_LENGTH> dir(fs.getBasePath(), "_maps_cache");
-			if (!OS::makePath(dir)) {
+			if (!os::makePath(dir)) {
 				logError("Could not create", dir);
 			}
 			const StaticString<MAX_PATH_LENGTH> path(dir, "/", is_heightmap ? "hm" : "im", tile.loc.z, "_", tile.loc.x, "_", tile.loc.y);
-			OS::OutputFile file;
+			os::OutputFile file;
 			if (file.open(path)) {
 				u8* out = is_heightmap ? (u8*)tile.hm_data.begin() : (u8*)tile.imagery_data.begin();
 				if (!file.write(out, TILE_SIZE * TILE_SIZE * sizeof(u32))) {
@@ -690,7 +690,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		FileSystem& fs = m_app.getWorldEditor().getEngine().getFileSystem();
 		const StaticString<MAX_PATH_LENGTH> path(fs.getBasePath(), "_maps_areas.dat");
 
-		OS::OutputFile file;
+		os::OutputFile file;
 		if (file.open(path)) {
 			file.write(m_areas.size());
 			for (const Area& area : m_areas) {
@@ -718,7 +718,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		FileSystem& fs = m_app.getWorldEditor().getEngine().getFileSystem();
 		const StaticString<MAX_PATH_LENGTH> path(fs.getBasePath(), "_maps_areas.dat");
 
-		OS::InputFile file;
+		os::InputFile file;
 		if (file.open(path)) {
 			i32 count;
 			file.read(count);
@@ -910,7 +910,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	bool browse()
 	{
-		return OS::getSaveFilename(Span(m_out_path), "Raw Image\0*.raw\0", "raw");
+		return os::getSaveFilename(Span(m_out_path), "Raw Image\0*.raw\0", "raw");
 	}
 
 	void createMapEntity() {
@@ -1015,7 +1015,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		WorldEditor& editor = m_app.getWorldEditor();
 		IAllocator& allocator = editor.getAllocator();
-		OS::OutputFile file;
+		os::OutputFile file;
 		if (!file.open(m_out_path)) {
 			logError("Failed to save ", m_out_path);
 			return;
@@ -1094,7 +1094,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		StaticString<MAX_PATH_LENGTH> mat_path(file_info.m_dir, "/", file_info.m_basename, ".mat");
-		OS::OutputFile mat_file;
+		os::OutputFile mat_file;
 		if (mat_file.open(mat_path)) {
 			mat_file << R"#(
 				shader "/pipelines/terrain.shd"
@@ -1116,7 +1116,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		StaticString<MAX_PATH_LENGTH> raw_meta_path(file_info.m_dir, "/", file_info.m_basename, ".raw.meta");
-		OS::OutputFile raw_meta_file;
+		os::OutputFile raw_meta_file;
 		if (raw_meta_file.open(raw_meta_path)) {
 			raw_meta_file << "wrap_mode_u = \"clamp\"\n";
 			raw_meta_file << "wrap_mode_v = \"clamp\"\n";
@@ -1124,7 +1124,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		StaticString<MAX_PATH_LENGTH> tga_meta_path(file_info.m_dir, "/", file_info.m_basename, ".tga.meta");
-		OS::OutputFile tga_meta_file;
+		os::OutputFile tga_meta_file;
 		if (tga_meta_file.open(tga_meta_path)) {
 			tga_meta_file << "srgb = true\n";
 			tga_meta_file << "wrap_mode_u = \"clamp\"\n";
@@ -1613,7 +1613,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		ImGui::SameLine();
 		if (ImGui::Button(ICON_FA_FILE_DOWNLOAD "download OSM data")) {
 			const StaticString<1024> osm_download_path("https://api.openstreetmap.org/api/0.6/map?bbox=", left, ",", bottom, ",", right, ",", top);
-			OS::shellExecuteOpen(osm_download_path);
+			os::shellExecuteOpen(osm_download_path);
 		}
 		if (!m_osm_tris.empty()) {
 			ImGui::SameLine();
@@ -1728,7 +1728,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				if (ImGui::Button("Add prefab")) area.prefabs.emplace() = "";
 				ImGui::SameLine();
 				if (ImGui::Button("Visualize")) {
-					const ComponentType model_instance_type = Reflection::getComponentType("model_instance");
+					const ComponentType model_instance_type = reflection::getComponentType("model_instance");
 					for (pugi::xml_node& w : m_osm_parser.m_ways) {
 						if (!OSMParser::hasTag(w, area.key, area.value)) continue;
 						const BoundingBox bb = m_osm_parser.createAreaMesh(w, randomColor().abgr(), Ref(m_osm_tris), m_app.getAllocator());
@@ -1927,7 +1927,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 		ImGui::SameLine();
 		if (ImGuiEx::IconButton(ICON_FA_COPY, "Copy to clipboard")) {
-			OS::copyToClipboard(loc);
+			os::copyToClipboard(loc);
 		}
 		ImGui::SameLine();
 		if (ImGuiEx::IconButton(ICON_FA_BULLSEYE, "View")) {
