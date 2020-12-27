@@ -462,7 +462,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		float spacing = 1;
 		StaticString<64> key = "";
 		StaticString<64> value = "";
-		Array<StaticString<MAX_PATH_LENGTH>> prefabs;
+		Array<StaticString<LUMIX_MAX_PATH>> prefabs;
 	};
 
 	struct MapsTask : public Thread
@@ -580,7 +580,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		bool loadFromCache() {
 			FileSystem& fs = app->getWorldEditor().getEngine().getFileSystem();
-			const StaticString<MAX_PATH_LENGTH> path(fs.getBasePath(), "_maps_cache", "/", is_heightmap ? "hm" : "im", tile.loc.z, "_", tile.loc.x, "_", tile.loc.y);
+			const StaticString<LUMIX_MAX_PATH> path(fs.getBasePath(), "_maps_cache", "/", is_heightmap ? "hm" : "im", tile.loc.z, "_", tile.loc.x, "_", tile.loc.y);
 			
 			os::InputFile file;
 			if (file.open(path)) {
@@ -595,11 +595,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		void saveToCache() {
 			FileSystem& fs = app->getWorldEditor().getEngine().getFileSystem();
-			const StaticString<MAX_PATH_LENGTH> dir(fs.getBasePath(), "_maps_cache");
+			const StaticString<LUMIX_MAX_PATH> dir(fs.getBasePath(), "_maps_cache");
 			if (!os::makePath(dir)) {
 				logError("Could not create", dir);
 			}
-			const StaticString<MAX_PATH_LENGTH> path(dir, "/", is_heightmap ? "hm" : "im", tile.loc.z, "_", tile.loc.x, "_", tile.loc.y);
+			const StaticString<LUMIX_MAX_PATH> path(dir, "/", is_heightmap ? "hm" : "im", tile.loc.z, "_", tile.loc.x, "_", tile.loc.y);
 			os::OutputFile file;
 			if (file.open(path)) {
 				u8* out = is_heightmap ? (u8*)tile.hm_data.begin() : (u8*)tile.imagery_data.begin();
@@ -631,7 +631,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			return res ? 0 : -1;
 		}
 
-		StaticString<MAX_PATH_LENGTH> host;
+		StaticString<LUMIX_MAX_PATH> host;
 		StaticString<1024> path;
 		IAllocator& allocator;
 		volatile i32* downloaded_bytes;
@@ -688,7 +688,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	void saveAreas() {
 		FileSystem& fs = m_app.getWorldEditor().getEngine().getFileSystem();
-		const StaticString<MAX_PATH_LENGTH> path(fs.getBasePath(), "_maps_areas.dat");
+		const StaticString<LUMIX_MAX_PATH> path(fs.getBasePath(), "_maps_areas.dat");
 
 		os::OutputFile file;
 		if (file.open(path)) {
@@ -701,7 +701,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				file.write(area.key);
 				file.write(area.value);
 				file.write(area.prefabs.size());
-				for (const StaticString<MAX_PATH_LENGTH>& p : area.prefabs) {
+				for (const StaticString<LUMIX_MAX_PATH>& p : area.prefabs) {
 					file.write(p);
 				}
 			}
@@ -716,7 +716,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		m_areas.clear();
 
 		FileSystem& fs = m_app.getWorldEditor().getEngine().getFileSystem();
-		const StaticString<MAX_PATH_LENGTH> path(fs.getBasePath(), "_maps_areas.dat");
+		const StaticString<LUMIX_MAX_PATH> path(fs.getBasePath(), "_maps_areas.dat");
 
 		os::InputFile file;
 		if (file.open(path)) {
@@ -733,7 +733,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				i32 prefabs_count;
 				file.read(prefabs_count);
 				for (i32 j = 0; j < prefabs_count; ++j) {
-					StaticString<MAX_PATH_LENGTH>& p = area.prefabs.emplace();
+					StaticString<LUMIX_MAX_PATH>& p = area.prefabs.emplace();
 					file.read(p);
 				}
 			}
@@ -918,8 +918,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		const EntityRef e = editor.addEntityAt({0, 0, 0});
 		editor.addComponent(Span(&e, 1), TERRAIN_TYPE);
 		const PathInfo file_info(m_out_path);
-		StaticString<MAX_PATH_LENGTH> mat_path(file_info.m_dir, "/", file_info.m_basename, ".mat");
-		char rel_mat_path[MAX_PATH_LENGTH];
+		StaticString<LUMIX_MAX_PATH> mat_path(file_info.m_dir, "/", file_info.m_basename, ".mat");
+		char rel_mat_path[LUMIX_MAX_PATH];
 		
 		if (!editor.getEngine().getFileSystem().makeRelative(Span(rel_mat_path), mat_path)) {
 			logError("Can not load ", mat_path, " because it's not in root directory.");
@@ -1036,12 +1036,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		RenderInterface* ri = m_app.getRenderInterface();
 		PathInfo file_info(m_out_path);
-		StaticString<MAX_PATH_LENGTH> tga_path(file_info.m_dir, "/", file_info.m_basename, ".tga");
+		StaticString<LUMIX_MAX_PATH> tga_path(file_info.m_dir, "/", file_info.m_basename, ".tga");
 		ri->saveTexture(editor.getEngine(), tga_path, imagery.begin(), map_size, map_size, true);
 
-		const StaticString<MAX_PATH_LENGTH> albedo_path(file_info.m_dir, "albedo_detail.ltc");
-		const StaticString<MAX_PATH_LENGTH> normal_path(file_info.m_dir, "normal_detail.ltc");
-		const StaticString<MAX_PATH_LENGTH> splatmap_meta_path(file_info.m_dir, file_info.m_basename, ".tga.meta");
+		const StaticString<LUMIX_MAX_PATH> albedo_path(file_info.m_dir, "albedo_detail.ltc");
+		const StaticString<LUMIX_MAX_PATH> normal_path(file_info.m_dir, "normal_detail.ltc");
+		const StaticString<LUMIX_MAX_PATH> splatmap_meta_path(file_info.m_dir, file_info.m_basename, ".tga.meta");
 		
 		if (!file.open(splatmap_meta_path)) {
 			logError("Failed to create ", splatmap_meta_path);
@@ -1093,7 +1093,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			file.close();
 		}
 
-		StaticString<MAX_PATH_LENGTH> mat_path(file_info.m_dir, "/", file_info.m_basename, ".mat");
+		StaticString<LUMIX_MAX_PATH> mat_path(file_info.m_dir, "/", file_info.m_basename, ".mat");
 		os::OutputFile mat_file;
 		if (mat_file.open(mat_path)) {
 			mat_file << R"#(
@@ -1115,7 +1115,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			mat_file.close();
 		}
 
-		StaticString<MAX_PATH_LENGTH> raw_meta_path(file_info.m_dir, "/", file_info.m_basename, ".raw.meta");
+		StaticString<LUMIX_MAX_PATH> raw_meta_path(file_info.m_dir, "/", file_info.m_basename, ".raw.meta");
 		os::OutputFile raw_meta_file;
 		if (raw_meta_file.open(raw_meta_path)) {
 			raw_meta_file << "wrap_mode_u = \"clamp\"\n";
@@ -1123,7 +1123,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			raw_meta_file.close();
 		}
 
-		StaticString<MAX_PATH_LENGTH> tga_meta_path(file_info.m_dir, "/", file_info.m_basename, ".tga.meta");
+		StaticString<LUMIX_MAX_PATH> tga_meta_path(file_info.m_dir, "/", file_info.m_basename, ".tga.meta");
 		os::OutputFile tga_meta_file;
 		if (tga_meta_file.open(tga_meta_path)) {
 			tga_meta_file << "srgb = true\n";
@@ -1710,10 +1710,10 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 					}
 				}
 
-				for (StaticString<MAX_PATH_LENGTH>& path : area.prefabs) {
+				for (StaticString<LUMIX_MAX_PATH>& path : area.prefabs) {
 					ImGuiEx::Label("Prefab");
 					const u32 idx = u32(&path - area.prefabs.begin());
-					const StaticString<MAX_PATH_LENGTH> id("##a", idx);
+					const StaticString<LUMIX_MAX_PATH> id("##a", idx);
 					ImGui::BeginGroup();
 					if (ImGui::Button(StaticString<64>(ICON_FA_TRASH, "##r", idx))) {
 						area.prefabs.erase(idx);
@@ -1752,7 +1752,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		if (ImGui::CollapsingHeader("Polylines")) {
 			ImGui::PushID("polyline");
 			ImGuiEx::Label("Prefab");
-			static char prefab[MAX_PATH_LENGTH] = ""; 
+			static char prefab[LUMIX_MAX_PATH] = ""; 
 			m_app.getAssetBrowser().resourceInput("##polyline_prefab", Span(prefab), PrefabResource::TYPE);
 			
 			static char tag_key[64] = "";
@@ -1836,7 +1836,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		ImGuiEx::Label("Output");
-		if (ImGui::Button(StaticString<MAX_PATH_LENGTH + 128>(m_out_path[0] ? m_out_path : "Click to set"), ImVec2(-1, 0))) {
+		if (ImGui::Button(StaticString<LUMIX_MAX_PATH + 128>(m_out_path[0] ? m_out_path : "Click to set"), ImVec2(-1, 0))) {
 			browse();
 		}
 
@@ -1961,7 +1961,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	IVec2 m_offset{0, 0};
 	// TODO handle values other than 1
 	int m_size = 1;
-	char m_out_path[MAX_PATH_LENGTH];
+	char m_out_path[LUMIX_MAX_PATH];
 	IVec2 m_drag_start_offset;
 	bool m_is_dragging = false;
 	OSMParser m_osm_parser;
