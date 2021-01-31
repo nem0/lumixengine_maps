@@ -195,9 +195,10 @@ struct OSMParser {
 		
 	}
 
-	void getWay(const pugi::xml_node& way, Ref<Array<DVec3>> out) const {
-		RenderInterface* ri = m_app.getRenderInterface();
-		Universe* universe = m_app.getWorldEditor().getUniverse();
+	void getWay(const pugi::xml_node& way, EntityRef terrain, Ref<Array<DVec3>> out) const {
+		WorldEditor& editor = m_app.getWorldEditor();
+		Universe* universe = editor.getUniverse();
+		RenderScene* scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
 		
 		for (pugi::xml_node& c : way.children()) {
 			if (equalStrings(c.name(), "nd")) {
@@ -205,10 +206,8 @@ struct OSMParser {
 				getLatLon(c, Ref(lat_lon));
 				DVec3 p;
 				p.x = (lat_lon.y - m_min_lon) / m_lon_range * m_scale;
-				p.y = 9'001;
 				p.z = (m_min_lat + m_lat_range - lat_lon.x) / m_lat_range * m_scale;
-				const UniverseView::RayHit hit = ri->castRay(*universe, p, Vec3(0, -1, 0), INVALID_ENTITY);
-				p.y = hit.is_hit ? p.y - hit.t : 0;
+				p.y = scene->getTerrainHeightAt(terrain, (float)p.x, (float)p.z);
 				out->push(p);
 			}
 		}		
@@ -244,9 +243,9 @@ struct OSMParser {
 		return true;
 	}
 
-	BoundingBox createAreaMesh(const pugi::xml_node& way, u32 abgr, Ref<Array<UniverseView::Vertex>> out, IAllocator& allocator) const {
+	BoundingBox createAreaMesh(const pugi::xml_node& way, EntityRef terrain, u32 abgr, Ref<Array<UniverseView::Vertex>> out, IAllocator& allocator) const {
 		Array<DVec3> polygon(allocator);
-		getWay(way, Ref(polygon));
+		getWay(way, terrain, Ref(polygon));
 		if (polygon.size() < 3) return {};
 
 		polygon.pop();
@@ -1460,6 +1459,15 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		return scene->getTerrain(selected_entities[0]);
 	}
 	
+	EntityPtr getTerrain() const {
+		WorldEditor& editor = m_app.getWorldEditor();
+		if (editor.getSelectedEntities().size() != 1) return INVALID_ENTITY;
+		const Universe* universe = editor.getUniverse();
+		const EntityRef terrain = editor.getSelectedEntities()[0];
+		if (!universe->hasComponent(terrain, TERRAIN_TYPE)) return INVALID_ENTITY;
+		return terrain;
+	}
+
 	void rasterGround(const Area& area, const Array<u8>& mask, u32 mask_size) {
 		if (area.ground == 0xff) return;
 		
@@ -1552,13 +1560,16 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		for (const auto& prefab : area.prefabs) {
 			transforms.emplace(m_app.getAllocator());
 		}
-		
+
+		const EntityPtr terrain = getTerrain();
+		if (!terrain.isValid()) return;
+
 		for (pugi::xml_node& w : m_osm_parser.m_ways) {
 			if (!OSMParser::hasTag(w, area.key, area.value)) continue;
 
 			polygon.clear();
 			points.clear();
-			m_osm_parser.getWay(w, Ref(polygon));
+			m_osm_parser.getWay(w, (EntityRef)terrain, Ref(polygon));
 
 			for (const DVec3 p : polygon) {
 				DVec2 tmp;
@@ -1575,21 +1586,17 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		const i32 prefabs_count = area.prefabs.size();
 		if (prefabs_count == 0) return;
 
-		RenderInterface* ri = m_app.getRenderInterface();
+		RenderScene* render_scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
+
 		const u8 ref = area.inverted ? 0 : 0xff;
 		for (float y = 0; y < size; y += area.spacing) {
 			for (float x = 0; x < size; x += area.spacing) {
 				if (bitmap[i32(x) + i32(y) * size] == ref) {
 					DVec3 pos;
 					pos.x = (x + area.spacing * randFloat() * 0.9f - 0.45f) / (float)size * m_osm_parser.m_scale;
-					pos.y = 9'001;
 					pos.z = (1 - (y + area.spacing * randFloat() * 0.9f - 0.45f) / (float)size) * m_osm_parser.m_scale;
+					pos.y = render_scene->getTerrainHeightAt((EntityRef)terrain, (float)pos.x, (float)pos.z);
 
-					auto hit = ri->castRay(*universe, pos, Vec3(0, -1, 0), INVALID_ENTITY);
-					if (hit.is_hit) {
-						pos += Vec3(0, -hit.t, 0);
-					}
-					
 					transforms[rand(0, prefabs_count - 1)].push({pos, Quat(Vec3(0, 1, 0), randFloat() * 2 * PI), 1});
 				}
 			}
@@ -1733,17 +1740,23 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				}
 
 				if (ImGui::Button("Add prefab")) area.prefabs.push(nullptr);
-				ImGui::SameLine();
-				if (ImGui::Button("Visualize")) {
-					const ComponentType model_instance_type = reflection::getComponentType("model_instance");
-					for (pugi::xml_node& w : m_osm_parser.m_ways) {
-						if (!OSMParser::hasTag(w, area.key, area.value)) continue;
-						const BoundingBox bb = m_osm_parser.createAreaMesh(w, randomColor().abgr(), Ref(m_osm_tris), m_app.getAllocator());
-						//const EntityRef e = editor.addEntity();
-						//const Quat rot(Vec3(0, 1, 0), bb.yaw);
-						//editor.setEntitiesPositionsAndRotations(&e, &bb.center, &rot, 1);
-						//editor.addComponent(Span(&e, 1), model_instance_type);
-						//editor.setProperty(model_instance_type, "", -1, "Source", Span(&e, 1), Path("models/shapes/cube.fbx"));
+				
+				if (editor.getSelectedEntities().size() == 1) {
+					const EntityRef terrain = editor.getSelectedEntities()[0];
+					if (editor.getUniverse()->hasComponent(terrain, TERRAIN_TYPE)) {
+						ImGui::SameLine();
+						if (ImGui::Button("Visualize")) {
+							const ComponentType model_instance_type = reflection::getComponentType("model_instance");
+							for (pugi::xml_node& w : m_osm_parser.m_ways) {
+								if (!OSMParser::hasTag(w, area.key, area.value)) continue;
+								const BoundingBox bb = m_osm_parser.createAreaMesh(w, terrain, randomColor().abgr(), Ref(m_osm_tris), m_app.getAllocator());
+								//const EntityRef e = editor.addEntity();
+								//const Quat rot(Vec3(0, 1, 0), bb.yaw);
+								//editor.setEntitiesPositionsAndRotations(&e, &bb.center, &rot, 1);
+								//editor.addComponent(Span(&e, 1), model_instance_type);
+								//editor.setProperty(model_instance_type, "", -1, "Source", Span(&e, 1), Path("models/shapes/cube.fbx"));
+							}
+						}
 					}
 				}
 				ImGui::SameLine();
@@ -1770,7 +1783,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			ImGuiEx::Label("Spacing");
 			ImGui::DragFloat("##spac", &spacing, 0.01f);
 
-			if (prefab[0] && ImGui::Button("Create")) {
+			const EntityPtr terrain = getTerrain();
+			if (prefab[0] && terrain.isValid() && ImGui::Button("Create")) {
 				PrefabResource* prefab_res = editor.getEngine().getResourceManager().load<PrefabResource>(Path(prefab));
 				RenderInterface* ri = m_app.getRenderInterface();
 				Universe* universe = m_app.getWorldEditor().getUniverse();
@@ -1784,7 +1798,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 					bool first = true;
 					double t = 0;
 					polyline.clear();
-					m_osm_parser.getWay(w, Ref(polyline));
+					m_osm_parser.getWay(w, (EntityRef)terrain, Ref(polyline));
 					for (i32 i = 0; i < polyline.size() - 1; ++i) {
 						DVec3 a = polyline[i];
 						DVec3 b = polyline[i + 1];
@@ -1807,12 +1821,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				editor.getPrefabSystem().instantiatePrefabs(*prefab_res, transforms);
 			}
 
-			if (ImGui::Button("Show")) {
+			if (terrain.isValid() && ImGui::Button("Show")) {
 				Array<DVec3> polyline(m_app.getAllocator());
 				for (pugi::xml_node& w : m_osm_parser.m_ways) {
 					if (!OSMParser::hasTag(w, tag_key, tag_value)) continue;
 					polyline.clear();
-					m_osm_parser.getWay(w, Ref(polyline));
+					m_osm_parser.getWay(w, (EntityRef)terrain, Ref(polyline));
 
 					m_osm_parser.createPolyline(polyline, randomColor().abgr(), Ref(m_osm_tris));
 				}
