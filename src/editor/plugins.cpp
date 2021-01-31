@@ -367,6 +367,7 @@ struct OSMParser {
 		m_nodes.clear();
 		m_ways.clear();
 		FILE* fp = fopen("map.osm", "rb");
+		if (!fp) return;
 		fseek(fp, 0, SEEK_END);
 		Array<char> data(m_app.getAllocator());
 		data.resize(ftell(fp) + 1);
@@ -1028,7 +1029,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		header.width = map_size;
 		header.height = map_size;
 		bool success = file.write(&header, sizeof(header));
-		success = success || file.write(&raw[0], raw.byte_size());
+		success = file.write(&raw[0], raw.byte_size()) || success;
 		if (!success) {
 			logError("Could not write ", m_out_path);
 		}
