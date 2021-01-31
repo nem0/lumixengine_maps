@@ -366,15 +366,14 @@ struct OSMParser {
 	void parseOSM(double left, double bottom, double right, double top, float scale) {
 		m_nodes.clear();
 		m_ways.clear();
-		FILE* fp = fopen("map.osm", "rb");
-		if (!fp) return;
-		fseek(fp, 0, SEEK_END);
+		os::InputFile file;
+		StaticString<LUMIX_MAX_PATH> path(m_app.getEngine().getFileSystem().getBasePath(), "map.osm");
+		if (!file.open(path)) return;
 		Array<char> data(m_app.getAllocator());
-		data.resize(ftell(fp) + 1);
+		data.resize((u32)file.size());
 		data.back() = '\0';
-		fseek(fp, 0, SEEK_SET);
-		fread(data.begin(), 1, data.size(), fp);
-		fclose(fp);
+		if (!file.read(data.begin(), data.byte_size())) return;
+		file.close();
 		const pugi::xml_parse_result res = m_doc.load_string(data.begin());
 		ASSERT(pugi::status_ok == res.status);
 
@@ -463,7 +462,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		float spacing = 1;
 		StaticString<64> key = "";
 		StaticString<64> value = "";
-		Array<StaticString<LUMIX_MAX_PATH>> prefabs;
+		Array<PrefabResource*> prefabs;
 	};
 
 	struct MapsTask : public Thread
@@ -702,8 +701,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				file.write(area.key);
 				file.write(area.value);
 				file.write(area.prefabs.size());
-				for (const StaticString<LUMIX_MAX_PATH>& p : area.prefabs) {
-					file.write(p);
+				for (const PrefabResource* p : area.prefabs) {
+					StaticString<LUMIX_MAX_PATH> path(p ? p->getPath().c_str() : "");
+					file.write(path);
 				}
 			}
 			file.close();
@@ -734,8 +734,10 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				i32 prefabs_count;
 				file.read(prefabs_count);
 				for (i32 j = 0; j < prefabs_count; ++j) {
-					StaticString<LUMIX_MAX_PATH>& p = area.prefabs.emplace();
-					file.read(p);
+					StaticString<LUMIX_MAX_PATH> path;
+					file.read(path);
+					PrefabResource* prefab = path[0] ? m_app.getEngine().getResourceManager().load<PrefabResource>(Path(path)) : nullptr;
+					area.prefabs.push(prefab);
 				}
 			}
 			file.close();
@@ -1592,11 +1594,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				}
 			}
 		}
-		for (const auto& prefab : area.prefabs) {
-			PrefabResource* res = editor.getEngine().getResourceManager().load<PrefabResource>(Path(prefab));
-			const u32 i = u32(&prefab - area.prefabs.begin());
-			editor.getPrefabSystem().instantiatePrefabs(*res, transforms[i]);
-			res->decRefCount();
+		for (u32 i = 0; i < (u32)area.prefabs.size(); ++i) {
+			PrefabResource* prefab = area.prefabs[i];
+			if (!prefab) continue;
+
+			editor.getPrefabSystem().instantiatePrefabs(*prefab, transforms[i]);
 		}
 	}
 
@@ -1711,9 +1713,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 					}
 				}
 
-				for (StaticString<LUMIX_MAX_PATH>& path : area.prefabs) {
+				for (u32 idx = 0; idx < (u32)area.prefabs.size(); ++idx) {
+					PrefabResource* prefab = area.prefabs[idx];
 					ImGuiEx::Label("Prefab");
-					const u32 idx = u32(&path - area.prefabs.begin());
 					const StaticString<LUMIX_MAX_PATH> id("##a", idx);
 					ImGui::BeginGroup();
 					if (ImGui::Button(StaticString<64>(ICON_FA_TRASH, "##r", idx))) {
@@ -1722,11 +1724,15 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 						break;
 					}
 					ImGui::SameLine();
-					m_app.getAssetBrowser().resourceInput(id, Span(path.data), PrefabResource::TYPE);
+					StaticString<LUMIX_MAX_PATH> path(prefab ? prefab->getPath().c_str() : "");
+					if (m_app.getAssetBrowser().resourceInput(id, Span(path.data), PrefabResource::TYPE)) {
+						if (prefab) prefab->decRefCount();
+						area.prefabs[idx] = m_app.getEngine().getResourceManager().load<PrefabResource>(Path(path));
+					}
 					ImGui::EndGroup();
 				}
 
-				if (ImGui::Button("Add prefab")) area.prefabs.emplace() = "";
+				if (ImGui::Button("Add prefab")) area.prefabs.push(nullptr);
 				ImGui::SameLine();
 				if (ImGui::Button("Visualize")) {
 					const ComponentType model_instance_type = reflection::getComponentType("model_instance");
