@@ -12,6 +12,7 @@
 #include "engine/geometry.h"
 #include "engine/hash_map.h"
 #include "engine/log.h"
+#include "engine/lua_wrapper.h"
 #include "engine/math.h"
 #include "engine/os.h"
 #include "engine/path.h"
@@ -208,6 +209,23 @@ struct OSMParser {
 				p.x = (lat_lon.y - m_min_lon) / m_lon_range * m_scale;
 				p.z = (m_min_lat + m_lat_range - lat_lon.x) / m_lat_range * m_scale;
 				p.y = scene->getTerrainHeightAt(terrain, (float)p.x, (float)p.z);
+				out->push(p);
+			}
+		}		
+	}
+
+	void getWay(const pugi::xml_node& way, Ref<Array<DVec2>> out) const {
+		WorldEditor& editor = m_app.getWorldEditor();
+		Universe* universe = editor.getUniverse();
+		RenderScene* scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
+		
+		for (pugi::xml_node& c : way.children()) {
+			if (equalStrings(c.name(), "nd")) {
+				DVec2 lat_lon;
+				getLatLon(c, Ref(lat_lon));
+				DVec2 p;
+				p.x = (lat_lon.y - m_min_lon) / m_lon_range * m_scale;
+				p.y = (m_min_lat + m_lat_range - lat_lon.x) / m_lat_range * m_scale;
 				out->push(p);
 			}
 		}		
@@ -651,7 +669,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		, m_osm_parser(app)
 		, m_osm_lines(app.getAllocator())
 		, m_osm_tris(app.getAllocator())
-		, m_areas(app.getAllocator())
+		, m_bitmap(app.getAllocator())
+		, m_tmp_bitmap(app.getAllocator())
 	{
 		#ifdef _WIN32
 			WORD sockVer;
@@ -685,66 +704,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		clear();
 	}
 
-	void saveAreas() {
-		FileSystem& fs = m_app.getWorldEditor().getEngine().getFileSystem();
-		const StaticString<LUMIX_MAX_PATH> path(fs.getBasePath(), "_maps_areas.dat");
-
-		os::OutputFile file;
-		if (file.open(path)) {
-			file.write(m_areas.size());
-			for (const Area& area : m_areas) {
-				file.write(area.grass);
-				file.write(area.ground);
-				file.write(area.inverted);
-				file.write(area.spacing);
-				file.write(area.key);
-				file.write(area.value);
-				file.write(area.prefabs.size());
-				for (const PrefabResource* p : area.prefabs) {
-					StaticString<LUMIX_MAX_PATH> path(p ? p->getPath().c_str() : "");
-					file.write(path);
-				}
-			}
-			file.close();
-		}
-		else {
-			logError("Failed to save ", path);
-		}
-	}
-
-	void loadAreas() {
-		m_areas.clear();
-
-		FileSystem& fs = m_app.getWorldEditor().getEngine().getFileSystem();
-		const StaticString<LUMIX_MAX_PATH> path(fs.getBasePath(), "_maps_areas.dat");
-
-		os::InputFile file;
-		if (file.open(path)) {
-			i32 count;
-			file.read(count);
-			for (i32 i = 0; i < count; ++i) {
-				Area& area = m_areas.emplace(m_app.getAllocator());
-				file.read(area.grass);
-				file.read(area.ground);
-				file.read(area.inverted);
-				file.read(area.spacing);
-				file.read(area.key);
-				file.read(area.value);
-				i32 prefabs_count;
-				file.read(prefabs_count);
-				for (i32 j = 0; j < prefabs_count; ++j) {
-					StaticString<LUMIX_MAX_PATH> path;
-					file.read(path);
-					PrefabResource* prefab = path[0] ? m_app.getEngine().getResourceManager().load<PrefabResource>(Path(path)) : nullptr;
-					area.prefabs.push(prefab);
-				}
-			}
-			file.close();
-		}
-		else {
-			logError("Failed to load ", path);
-		}
-	}
 
 	void parseOSMData(double left, double bottom, double right, double top, float scale) {
 		m_osm_parser.parseOSM(left, bottom, right, top, scale);
@@ -1356,10 +1315,51 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		ImGui::End();
 	}
 	
-	void raster(const Array<IVec2>& points, u32 w, u32 h, Ref<Array<u8>> out) {
+	void raster(u8 value, const IVec2& p0, const IVec2& p1, u32 size, Ref<Array<u8>> out) {
+		// naive line rasterization
+		IVec2 a = p0;
+		IVec2 b = p1;
+
+		IVec2 d = b - a;
+		if (abs(d.x) > abs(d.y)) {
+			if (d.x < 0) swap(a, b);
+			d = b - a;
+	
+			for (i32 i = a.x; i <= b.x; ++i) {
+				i32 j = int(a.y + d.y * float(i - a.x) / d.x);
+				if (i < 1 || i >= (i32)size - 1) continue;
+				if (j < 1 || j >= (i32)size - 1) continue;
+
+				for (i32 k = -1; k <= 1; ++k) {
+					for (i32 l = -1; l <= 1; ++l) {
+						out.value[i + k + (j + l) * size] = value;
+					}
+				}
+			}
+		}
+		else {
+			if (d.y < 0) swap(a, b);
+			d = b - a;
+	
+			for (i32 j = a.y; j <= b.y; ++j) {
+				i32 i = int(a.x + d.x * float(j - a.y) / d.y);
+				if (i < 1 || i >= (i32)size - 1) continue;
+				if (j < 1 || j >= (i32)size - 1) continue;
+
+				for (i32 k = -1; k <= 1; ++k) {
+					for (i32 l = -1; l <= 1; ++l) {
+						out.value[i + k + (j + l) * size] = value;
+					}
+				}
+			}
+		}
+	}
+
+	void raster(u8 value, const Array<IVec2>& points, u32 w, Ref<Array<u8>> out) {
 		// naive polygon rasterization
 		if (points.empty()) return;
 
+		const u32 h = w;
 		for (u32 pixelY = 0; pixelY < h; ++pixelY) {
 			i32 nodeX[256];
 			u32 nodes = 0;
@@ -1382,7 +1382,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				nodeX[i] = clamp(nodeX[i], 0, w);
 				nodeX[i + 1] = clamp(nodeX[i + 1], 0, w);
 				for (i32 pixelX = nodeX[i]; pixelX < nodeX[i + 1]; pixelX++) {
-					out.value[pixelX + pixelY * w] = 0xff;
+					out.value[pixelX + pixelY * w] = value;
 				}
 			}
 		}
@@ -1468,48 +1468,208 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		return terrain;
 	}
 
-	void rasterGround(const Area& area, const Array<u8>& mask, u32 mask_size) {
-		if (area.ground == 0xff) return;
-		
-		const Terrain* terrain = getSelectedTerrain();
-		if (!terrain) return;
-		Texture* splatmap = terrain->getSplatmap();
-		if (!splatmap) {
-			logWarning("Missing splatmap");
-			return;
-		}
-		if(!splatmap->isReady()) {
-			logWarning("Splatmap not ready");
-			return;
+	
+
+
+	// clear(4096)
+	// maskPolygons { key = "landuse", value = "*", inverted = true }
+	// unmaskPolylines { key = "highway", value = "*" }
+	// place { 
+	//		prefabs = { "a.fab", "b.fab" },
+	//		spacing = 2,
+	// }
+	// paintGround(0b11)
+	// paintGrass(0b101)
+
+	void execute(const char* src) {
+		lua_State* L = luaL_newstate();
+
+		#define REGISTER(F) \
+		{\
+			lua_CFunction fn = &LuaWrapper::wrapMethodClosure<&MapsPlugin::F>;\
+			lua_pushlightuserdata(L, this); \
+			lua_pushcclosure(L, fn, 1);\
+			lua_setglobal(L, #F);\
 		}
 
-		auto is_masked = [&](u32 x, u32 y){
-			u32 i = u32(x / float(splatmap->width) * mask_size + 0.5f);
-			u32 j = u32(y / float(splatmap->height) * mask_size + 0.5f);
-			i = clamp(i, 0, mask_size - 1);
-			j = clamp(j, 0, mask_size - 1);
-			
-			return mask[i + j * mask_size] != 0;
-		};
+		REGISTER(clearMask);
+		REGISTER(maskPolygons);
+		REGISTER(maskPolylines);
+		REGISTER(unmaskPolylines);
+		REGISTER(unmaskPolygons);
+		REGISTER(place);
+		REGISTER(paintGrass);
+		REGISTER(paintGround);
 
-		u8* data = splatmap->getData();
-		for (u32 y = 0; y < splatmap->height; ++y) {
-			for (u32 x = 0; x < splatmap->width; ++x) {
-				if (is_masked(x, y)) {
-					u8* pixel = data + (x + (splatmap->height - y - 1) * splatmap->width) * 4;
-					pixel[0] = area.ground;
-					pixel[1] = area.ground;
-				}
-			}
-		}
-		splatmap->onDataUpdated(0, 0, splatmap->width, splatmap->height);	
+		LuaWrapper::execute(L, Span(src, src + stringLength(src)), "maps", 0);
+		lua_close(L);
 	}
 
-	void rasterGrass(const Area& area, const Array<u8>& mask, u32 mask_size) {
-		if (!area.grass) return;
+	struct WayDef {
+		char key[128];
+		char value[128];
+		bool inverted = false;
+
+		WayDef(lua_State* L) {
+			if (!LuaWrapper::checkStringField(L, 1, "key", Span(key))) {
+				luaL_error(L, "missing `key`");
+			}
+			if (!LuaWrapper::checkStringField(L, 1, "value", Span(value))) value[0] = '\0';
+			LuaWrapper::checkField(L, 1, "inverted", &inverted);
+		}
+	};
+
+	void clearMask(u32 size) {
+		m_bitmap.resize(size * size);
+		m_tmp_bitmap.resize(size * size);
+		memset(m_bitmap.begin(), 0, m_bitmap.byte_size());
+		m_bitmap_size = size;
+	}
+
+	void maskPolygons(lua_State* L) {
+		const WayDef def(L);
+		rasterPolygons(0xff, def);
+	}
+
+	void unmaskPolygons(lua_State* L) {
+		const WayDef def(L);
+		rasterPolygons(0, def);
+	}
+
+	void rasterPolygons(u8 value, const WayDef& def) {
+		Array<DVec2> polygon(m_app.getAllocator());
+		Array<IVec2> points(m_app.getAllocator());
 		
+		Array<u8>& bitmap = def.inverted ? m_tmp_bitmap : m_bitmap;
+		if (def.inverted) {
+			memset(m_tmp_bitmap.begin(), 0, m_tmp_bitmap.byte_size());
+		}
+		for (pugi::xml_node& w : m_osm_parser.m_ways) {
+			if (!OSMParser::hasTag(w, def.key, def.value)) continue;
+
+			polygon.clear();
+			points.clear();
+			m_osm_parser.getWay(w, Ref(polygon));
+
+			for (const DVec2 p : polygon) {
+				DVec2 tmp = toLocal(p);
+				points.push(IVec2((i32)tmp.x, (i32)tmp.y));
+			}
+			raster(value, points, m_bitmap_size, Ref(bitmap));
+		}
+
+		if (def.inverted) {
+			for (u32 i = 0, c = m_bitmap_size * m_bitmap_size; i < c; ++i) {
+				if (m_tmp_bitmap[i] == 0) m_bitmap[i] = value;
+			}
+		}
+	}
+
+	DVec2 toLocal(const DVec2& p) const {
+		DVec2 tmp;
+		tmp.x = p.x  / m_osm_parser.m_scale * (float)m_bitmap_size;
+		tmp.y = (1 - p.y  / m_osm_parser.m_scale) * (float)m_bitmap_size;
+		return tmp;
+	}
+
+	void maskPolylines(lua_State* L) {
+		const WayDef def(L);
+		rasterPolylines(0xff, def);
+	}
+
+	void unmaskPolylines(lua_State* L) {
+		const WayDef def(L);
+		rasterPolylines(0, def);
+	}
+
+	void rasterPolylines(u8 value, const WayDef& def) {
+		Array<DVec2> polyline(m_app.getAllocator());
+
+		Array<u8>& bitmap = def.inverted ? m_tmp_bitmap : m_bitmap;
+		if (def.inverted) {
+			memset(m_tmp_bitmap.begin(), 0, m_tmp_bitmap.byte_size());
+		}
+
+		for (pugi::xml_node& w : m_osm_parser.m_ways) {
+			if (!OSMParser::hasTag(w, def.key, def.value)) continue;
+
+			polyline.clear();
+			m_osm_parser.getWay(w, Ref(polyline));
+			for (i32 i = 0; i < polyline.size() - 1; ++i) {
+				const DVec2 a = toLocal(polyline[i]);
+				const DVec2 b = toLocal(polyline[i + 1]);
+				const IVec2 ia = IVec2((i32)a.x, (i32)a.y);
+				const IVec2 ib = IVec2((i32)b.x, (i32)b.y);
+				raster(value, ia, ib, m_bitmap_size, Ref(bitmap));
+			}
+		}
+
+		if (def.inverted) {
+			for (u32 i = 0, c = m_bitmap_size * m_bitmap_size; i < c; ++i) {
+				if (m_tmp_bitmap[i] == 0) m_bitmap[i] = value;
+			}
+		}
+	}
+
+	void place(lua_State* L) {
+		float spacing;
+		if (!LuaWrapper::checkField(L, 1, "spacing", &spacing)) {
+			luaL_error(L, "missing `spacing`");
+		}
+
+		const EntityPtr terrain = getTerrain();
+		if (!terrain.isValid()) {
+			luaL_error(L, "no terrain is selected");
+		}
+
+		const int type = LuaWrapper::getField(L, 1, "prefabs");
+		if (type == LUA_TNIL) luaL_error(L, "missing `prefabs`");
+		if (type != LUA_TTABLE) luaL_error(L, "`prefabs` is not a table");
+		Array<PrefabResource*> prefabs(m_app.getAllocator());
+		ResourceManagerHub& rm = m_app.getWorldEditor().getEngine().getResourceManager();
+		LuaWrapper::forEachArrayItem<const char*>(L, -1, "array of strings expected", [&](const char* path){
+			prefabs.push(rm.load<PrefabResource>(Path(path)));
+		});
+		lua_pop(L, 1);
+		if (prefabs.empty()) return;
+
+		Universe* universe = m_app.getWorldEditor().getUniverse();
+		RenderScene* render_scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
+		Array<Array<Transform>> transforms(m_app.getAllocator());
+		const i32 prefabs_count = prefabs.size();
+		for (const auto& prefab : prefabs) {
+			transforms.emplace(m_app.getAllocator());
+		}
+
+		for (float y = 0; y < m_bitmap_size; y += spacing) {
+			for (float x = 0; x < m_bitmap_size; x += spacing) {
+				if (m_bitmap[i32(x) + i32(y) * m_bitmap_size] != 0xff) continue;
+
+				DVec3 pos;
+				pos.x = (x + spacing * randFloat() * 0.9f - 0.45f) / (float)m_bitmap_size * m_osm_parser.m_scale;
+				pos.z = (1 - (y + spacing * randFloat() * 0.9f - 0.45f) / (float)m_bitmap_size) * m_osm_parser.m_scale;
+				pos.y = render_scene->getTerrainHeightAt((EntityRef)terrain, (float)pos.x, (float)pos.z);
+
+				transforms[rand(0, prefabs_count - 1)].push({pos, Quat(Vec3(0, 1, 0), randFloat() * 2 * PI), 1});
+			}
+		}
+
+		FileSystem& fs = m_app.getWorldEditor().getEngine().getFileSystem();
+		while (fs.hasWork()) {
+			os::sleep(10);
+			fs.processCallbacks();
+		}
+
+		for (u32 i = 0; i < (u32)prefabs.size(); ++i) {
+			m_app.getWorldEditor().getPrefabSystem().instantiatePrefabs(*prefabs[i], transforms[i]);
+			prefabs[i]->decRefCount();
+		}
+	}
+
+	void paintGround(u8 ground) {
 		const Terrain* terrain = getSelectedTerrain();
 		if (!terrain) return;
+		
 		Texture* splatmap = terrain->getSplatmap();
 		if (!splatmap) {
 			logWarning("Missing splatmap");
@@ -1521,12 +1681,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		auto is_masked = [&](u32 x, u32 y){
-			u32 i = u32(x / float(splatmap->width) * mask_size + 0.5f);
-			u32 j = u32(y / float(splatmap->height) * mask_size + 0.5f);
-			i = clamp(i, 0, mask_size - 1);
-			j = clamp(j, 0, mask_size - 1);
+			u32 i = u32(x / float(splatmap->width) * m_bitmap_size + 0.5f);
+			u32 j = u32(y / float(splatmap->height) * m_bitmap_size + 0.5f);
+			i = clamp(i, 0, m_bitmap_size - 1);
+			j = clamp(j, 0, m_bitmap_size - 1);
 			
-			return mask[i + j * mask_size] != 0;
+			return m_bitmap[i + j * m_bitmap_size] != 0;
 		};
 
 		u8* data = splatmap->getData();
@@ -1534,79 +1694,47 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			for (u32 x = 0; x < splatmap->width; ++x) {
 				if (is_masked(x, y)) {
 					u8* pixel = data + (x + (splatmap->height - y - 1) * splatmap->width) * 4;
-					memcpy(pixel + 2, &area.grass, sizeof(area.grass));
+					pixel[0] = ground;
+					pixel[1] = ground;
 				}
 			}
 		}
 		splatmap->onDataUpdated(0, 0, splatmap->width, splatmap->height);
 	}
 
-	void createArea(const Area& area)
-	{
-		Array<DVec3> polygon(m_app.getAllocator());
-		Array<IVec2> points(m_app.getAllocator());
-		Array<u8> bitmap(m_app.getAllocator());
-		const u32 size = 256 * (1 << m_size);
-		bitmap.resize(size * size);
-		memset(bitmap.begin(), 0, bitmap.byte_size());
-		const DVec2 from = {m_osm_parser.m_min_lat, m_osm_parser.m_min_lon};
-		const DVec2 range = {m_osm_parser.m_lat_range, m_osm_parser.m_lon_range};
-				
-		WorldEditor& editor = m_app.getWorldEditor();
-		Universe* universe = m_app.getWorldEditor().getUniverse();
-		
-		Array<Array<Transform>> transforms(m_app.getAllocator());
-		
-		for (const auto& prefab : area.prefabs) {
-			transforms.emplace(m_app.getAllocator());
+	void paintGrass(u16 grass) {
+		const Terrain* terrain = getSelectedTerrain();
+		if (!terrain) return;
+
+		Texture* splatmap = terrain->getSplatmap();
+		if (!splatmap) {
+			logWarning("Missing splatmap");
+			return;
+		}
+		if (!splatmap->isReady()) {
+			logWarning("Splatmap not ready");
+			return;
 		}
 
-		const EntityPtr terrain = getTerrain();
-		if (!terrain.isValid()) return;
+		auto is_masked = [&](u32 x, u32 y){
+			u32 i = u32(x / float(splatmap->width) * m_bitmap_size + 0.5f);
+			u32 j = u32(y / float(splatmap->height) * m_bitmap_size + 0.5f);
+			i = clamp(i, 0, m_bitmap_size - 1);
+			j = clamp(j, 0, m_bitmap_size - 1);
+			
+			return m_bitmap[i + j * m_bitmap_size] != 0;
+		};
 
-		for (pugi::xml_node& w : m_osm_parser.m_ways) {
-			if (!OSMParser::hasTag(w, area.key, area.value)) continue;
-
-			polygon.clear();
-			points.clear();
-			m_osm_parser.getWay(w, (EntityRef)terrain, Ref(polygon));
-
-			for (const DVec3 p : polygon) {
-				DVec2 tmp;
-				tmp.x = p.x  / m_osm_parser.m_scale * (float)size;
-				tmp.y = (1 - p.z  / m_osm_parser.m_scale) * (float)size;
-				points.push(IVec2((i32)tmp.x, (i32)tmp.y));
-			}
-			raster(points, size, size, Ref(bitmap));
-		}
-
-		rasterGrass(area, bitmap, size);
-		rasterGround(area, bitmap, size);
-
-		const i32 prefabs_count = area.prefabs.size();
-		if (prefabs_count == 0) return;
-
-		RenderScene* render_scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
-
-		const u8 ref = area.inverted ? 0 : 0xff;
-		for (float y = 0; y < size; y += area.spacing) {
-			for (float x = 0; x < size; x += area.spacing) {
-				if (bitmap[i32(x) + i32(y) * size] == ref) {
-					DVec3 pos;
-					pos.x = (x + area.spacing * randFloat() * 0.9f - 0.45f) / (float)size * m_osm_parser.m_scale;
-					pos.z = (1 - (y + area.spacing * randFloat() * 0.9f - 0.45f) / (float)size) * m_osm_parser.m_scale;
-					pos.y = render_scene->getTerrainHeightAt((EntityRef)terrain, (float)pos.x, (float)pos.z);
-
-					transforms[rand(0, prefabs_count - 1)].push({pos, Quat(Vec3(0, 1, 0), randFloat() * 2 * PI), 1});
+		u8* data = splatmap->getData();
+		for (u32 y = 0; y < splatmap->height; ++y) {
+			for (u32 x = 0; x < splatmap->width; ++x) {
+				if (is_masked(x, y)) {
+					u8* pixel = data + (x + (splatmap->height - y - 1) * splatmap->width) * 4;
+					memcpy(pixel + 2, &grass, sizeof(grass));
 				}
 			}
 		}
-		for (u32 i = 0; i < (u32)area.prefabs.size(); ++i) {
-			PrefabResource* prefab = area.prefabs[i];
-			if (!prefab) continue;
-
-			editor.getPrefabSystem().instantiatePrefabs(*prefab, transforms[i]);
-		}
+		splatmap->onDataUpdated(0, 0, splatmap->width, splatmap->height);
 	}
 
 	void OSMGUI() {
@@ -1657,171 +1785,42 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		WorldEditor& editor = m_app.getWorldEditor();
 		
-		if (ImGui::CollapsingHeader("Area")) {
-			if (ImGui::Button("Save areas")) saveAreas();
-			ImGui::SameLine();
-			if (ImGui::Button("Load areas")) loadAreas();
+		ImGui::InputTextMultiline("Script", m_script, sizeof(m_script));
+		if (ImGui::Button("Run")) execute(m_script);
 
-			ImGui::PushID("Area");
-			if (!m_areas.empty() && ImGui::Button("Create all")) {
-				for (const Area& area : m_areas) {
-					createArea(area);
-				}
-			}
-			if (!m_areas.empty()) ImGui::SameLine();
-			if (ImGui::Button("Reset visualization")) {
-				m_osm_tris.clear();
-				m_osm_lines.clear();
-			}
-			ImGui::SameLine();
-			if (ImGui::Button("Add area")) m_areas.emplace(m_app.getAllocator());
-			for (Area& area : m_areas) {
-				if (!ImGui::TreeNodeEx(&area, 0, "%d", int(&area - m_areas.begin()))) continue;
-
-				const char* values[] = { 
-					"forest\0landuse", 
-					"residential\0landuse",
-					"industrial\0landuse",
-					"farmland\0landuse",
-					"farmyard\0landuse",
-					"cemetery\0landuse",
-					"reservoir\0landuse",
-					"water\0natural",
-					"\0building"
-				};
-				tagInput(Span(area.key.data), Span(area.value.data), Span(values));
-				ImGuiEx::Label("Spacing");
-				ImGui::DragFloat("##dens", &area.spacing, 0.01f);
-				ImGuiEx::Label("Invert create");
-				ImGui::Checkbox("##inv", &area.inverted);
-
-				const Terrain* terrain = getSelectedTerrain();
-				if (terrain) {
-					ImGuiEx::Label("Grass");
-					for (i32 i = 0; i < terrain->getGrassTypeCount(); ++i) {
-						bool b = area.grass & (1 << i);
-						if (i > 0) ImGui::SameLine();
-						if (ImGui::Checkbox(StaticString<10>("##gra", i), &b)) {
-							if (b) area.grass |= 1 << i;
-							else area.grass &= ~(1 << i);
-						}
-					}
-					ImGuiEx::Label("Ground");
-					const Texture* albedo = terrain->getAlbedomap();
-					if (ImGui::BeginCombo("##ground",area.ground == 0xff ? "Do not use" : StaticString<32>("", area.ground).data)) {
-						if (ImGui::Selectable("Do not use")) area.ground = 0xff;
-						
-						for (u32 i = 0; i < (albedo ? albedo->layers : 0); ++i) {
-							if (ImGui::Selectable(StaticString<8>("", i))) {
-								area.ground = i;
-							}
-						}
-						ImGui::EndCombo();
-					}
-				}
-
-				for (u32 idx = 0; idx < (u32)area.prefabs.size(); ++idx) {
-					PrefabResource* prefab = area.prefabs[idx];
-					ImGuiEx::Label("Prefab");
-					const StaticString<LUMIX_MAX_PATH> id("##a", idx);
-					ImGui::BeginGroup();
-					if (ImGui::Button(StaticString<64>(ICON_FA_TRASH, "##r", idx))) {
-						area.prefabs.erase(idx);
-						ImGui::EndGroup();
-						break;
-					}
-					ImGui::SameLine();
-					StaticString<LUMIX_MAX_PATH> path(prefab ? prefab->getPath().c_str() : "");
-					if (m_app.getAssetBrowser().resourceInput(id, Span(path.data), PrefabResource::TYPE)) {
-						if (prefab) prefab->decRefCount();
-						area.prefabs[idx] = m_app.getEngine().getResourceManager().load<PrefabResource>(Path(path));
-					}
-					ImGui::EndGroup();
-				}
-
-				if (ImGui::Button("Add prefab")) area.prefabs.push(nullptr);
+		static char tag_key[64] = "";
+		static char tag_value[64] = "";
+		const char* values[] = {
+			"footway\0highway",
+			"track\0highway",
+			"path\0highway",
+			"tree_row\0natural",
+			"stream\0waterway",
+			"forest\0landuse",
+			"residential\0landuse",
+			"industrial\0landuse",
+			"farmland\0landuse",
+			"farmyard\0landuse",
+			"cemetery\0landuse",
+			"reservoir\0landuse",
+			"water\0natural",
+			"\0building"
+		};
+		ImGui::Separator();
+		tagInput(Span(tag_key), Span(tag_value), Span(values));
 				
-				if (editor.getSelectedEntities().size() == 1) {
-					const EntityRef terrain = editor.getSelectedEntities()[0];
-					if (editor.getUniverse()->hasComponent(terrain, TERRAIN_TYPE)) {
-						ImGui::SameLine();
-						if (ImGui::Button("Visualize")) {
-							const ComponentType model_instance_type = reflection::getComponentType("model_instance");
-							for (pugi::xml_node& w : m_osm_parser.m_ways) {
-								if (!OSMParser::hasTag(w, area.key, area.value)) continue;
-								const BoundingBox bb = m_osm_parser.createAreaMesh(w, terrain, randomColor().abgr(), Ref(m_osm_tris), m_app.getAllocator());
-								//const EntityRef e = editor.addEntity();
-								//const Quat rot(Vec3(0, 1, 0), bb.yaw);
-								//editor.setEntitiesPositionsAndRotations(&e, &bb.center, &rot, 1);
-								//editor.addComponent(Span(&e, 1), model_instance_type);
-								//editor.setProperty(model_instance_type, "", -1, "Source", Span(&e, 1), Path("models/shapes/cube.fbx"));
-							}
-						}
-					}
-				}
-				ImGui::SameLine();
-				if (ImGui::Button("Create")) {
-					createArea(area);
-				}
-				ImGui::TreePop();
-			}
-
-			ImGui::PopID();
-		}
-
-		if (ImGui::CollapsingHeader("Polylines")) {
-			ImGui::PushID("polyline");
-			ImGuiEx::Label("Prefab");
-			static char prefab[LUMIX_MAX_PATH] = ""; 
-			m_app.getAssetBrowser().resourceInput("##polyline_prefab", Span(prefab), PrefabResource::TYPE);
-			
-			static char tag_key[64] = "";
-			static char tag_value[64] = "";
-			const char* values[] = { "footway\0highway", "track\0highway", "path\0highway", "tree_row\0natural", "stream\0waterway" };
-			tagInput(Span(tag_key), Span(tag_value), Span(values));
-			static float spacing = 1.f;
-			ImGuiEx::Label("Spacing");
-			ImGui::DragFloat("##spac", &spacing, 0.01f);
-
-			const EntityPtr terrain = getTerrain();
-			if (prefab[0] && terrain.isValid() && ImGui::Button("Create")) {
-				PrefabResource* prefab_res = editor.getEngine().getResourceManager().load<PrefabResource>(Path(prefab));
-				RenderInterface* ri = m_app.getRenderInterface();
-				Universe* universe = m_app.getWorldEditor().getUniverse();
-				Array<DVec3> polyline(m_app.getAllocator());
-				Array<Transform> transforms(m_app.getAllocator());
+		const EntityPtr terrain = getTerrain();
+		if (terrain.isValid()) {
+			if (ImGui::Button("Show Area")) {
+				const ComponentType model_instance_type = reflection::getComponentType("model_instance");
 				for (pugi::xml_node& w : m_osm_parser.m_ways) {
 					if (!OSMParser::hasTag(w, tag_key, tag_value)) continue;
-
-					DVec3 pos;
-					DVec3 prev;
-					bool first = true;
-					double t = 0;
-					polyline.clear();
-					m_osm_parser.getWay(w, (EntityRef)terrain, Ref(polyline));
-					for (i32 i = 0; i < polyline.size() - 1; ++i) {
-						DVec3 a = polyline[i];
-						DVec3 b = polyline[i + 1];
-
-						const double len = (b - a).length();
-
-						for (; t < len; t += spacing) {
-							DVec3 p = lerp(a, b, float(t / len));
-							p.x += spacing * randFloat() * 0.9f - 0.45f;
-							p.z += spacing * randFloat() * 0.9f - 0.45f;
-							auto hit = ri->castRay(*universe, p, Vec3(0, -1, 0), INVALID_ENTITY);
-							if (hit.is_hit) {
-								p += Vec3(0, -hit.t, 0);
-							}
-							transforms.push({p, Quat(Vec3(0, 1, 0), randFloat() * 2 * PI), 1});
-						}
-						t -= len;
-					}
+					m_osm_parser.createAreaMesh(w, (EntityRef)terrain, randomColor().abgr(), Ref(m_osm_tris), m_app.getAllocator());
 				}
-				editor.getPrefabSystem().instantiatePrefabs(*prefab_res, transforms);
 			}
 
-			if (terrain.isValid() && ImGui::Button("Show")) {
+			ImGui::SameLine();
+			if (ImGui::Button("Show polyline")) {
 				Array<DVec3> polyline(m_app.getAllocator());
 				for (pugi::xml_node& w : m_osm_parser.m_ways) {
 					if (!OSMParser::hasTag(w, tag_key, tag_value)) continue;
@@ -1831,7 +1830,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 					m_osm_parser.createPolyline(polyline, randomColor().abgr(), Ref(m_osm_tris));
 				}
 			}
-			ImGui::PopID();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Reset visualization")) {
+			m_osm_tris.clear();
+			m_osm_lines.clear();
 		}
 	}
 
@@ -1968,7 +1971,16 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	bool m_show_hm = false;
 	StudioApp& m_app;
-	Array<Area> m_areas;
+	char m_script[4096] = R"#(
+		clearMask(1024)
+		maskPolygons { key = "landuse", inverted = true }
+		unmaskPolylines { key = "highway" }
+		place { spacing = 2, prefabs = { "prefabs/05_poplar_skan.fab" } }
+		paintGrass (0xffFF)
+	)#";
+	Array<u8> m_tmp_bitmap;
+	Array<u8> m_bitmap;
+	u32 m_bitmap_size;
 	Array<TileData*> m_tiles;
 	Array<TileData*> m_cache;
 	Array<MapsTask*> m_queue;
