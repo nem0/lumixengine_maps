@@ -692,6 +692,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	void onSettingsLoaded() override {
 		m_open = m_app.getSettings().getValue("is_maps_plugin_open", false);
+		const u32 len = m_app.getSettings().getValue("maps_script", Span(m_script));
+		if (len == 0) m_script[0] = '\0';
+		if (len >= lengthOf(m_script)) {
+			logWarning("Map script saved in settings is too long");
+		}
 	}
 
 	~MapsPlugin()
@@ -989,7 +994,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		header.width = map_size;
 		header.height = map_size;
 		bool success = file.write(&header, sizeof(header));
-		success = file.write(&raw[0], raw.byte_size()) || success;
+		success = file.write(&raw[0], raw.byte_size()) && success;
 		if (!success) {
 			logError("Could not write ", m_out_path);
 		}
@@ -1468,20 +1473,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		return terrain;
 	}
 
-	
-
-
-	// clear(4096)
-	// maskPolygons { key = "landuse", value = "*", inverted = true }
-	// unmaskPolylines { key = "highway", value = "*" }
-	// place { 
-	//		prefabs = { "a.fab", "b.fab" },
-	//		spacing = 2,
-	// }
-	// paintGround(0b11)
-	// paintGrass(0b101)
-
 	void execute(const char* src) {
+		m_app.getSettings().setValue("maps_script", src);
 		lua_State* L = luaL_newstate();
 
 		#define REGISTER(F) \
@@ -1493,11 +1486,14 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		REGISTER(clearMask);
+		REGISTER(invertMask);
+		REGISTER(shrinkMask);
+		REGISTER(growMask);
 		REGISTER(maskPolygons);
 		REGISTER(maskPolylines);
 		REGISTER(unmaskPolylines);
 		REGISTER(unmaskPolygons);
-		REGISTER(place);
+		REGISTER(placePrefabs);
 		REGISTER(paintGrass);
 		REGISTER(paintGround);
 
@@ -1518,6 +1514,72 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			LuaWrapper::checkField(L, 1, "inverted", &inverted);
 		}
 	};
+
+	void shrinkMask() {
+		auto get = [&](i32 i, i32 j){
+			if (i < 0) return false;
+			if (i >= (i32)m_bitmap_size) return false;
+			if (j < 0) return false;
+			if (j >= (i32)m_bitmap_size) return false;
+
+			return m_bitmap[i +  j * m_bitmap_size] != 0;
+		};
+
+		for (i32 j = 0; j < (i32)m_bitmap_size; ++j) {
+			for (i32 i = 0; i < (i32)m_bitmap_size; ++i) {
+				m_tmp_bitmap[i + j * m_bitmap_size] = 
+					(get(i, j)
+					&& get(i + 1, j)
+					&& get(i - 1, j)
+					&& get(i, j - 1)
+					&& get(i + 1, j - 1)
+					&& get(i - 1, j - 1)
+					&& get(i, j + 1)
+					&& get(i + 1, j + 1)
+					&& get(i - 1, j + 1)) ? 0xff : 0;
+			}
+		}
+
+		for (u32 i = 0; i < m_bitmap_size * m_bitmap_size; ++i) {
+			m_bitmap[i] = m_tmp_bitmap[i];
+		}
+	}
+
+	void growMask() {
+		auto get = [&](i32 i, i32 j){
+			if (i < 0) return false;
+			if (i >= (i32)m_bitmap_size) return false;
+			if (j < 0) return false;
+			if (j >= (i32)m_bitmap_size) return false;
+
+			return m_bitmap[i +  j * m_bitmap_size] != 0;
+		};
+
+		for (i32 j = 0; j < (i32)m_bitmap_size; ++j) {
+			for (i32 i = 0; i < (i32)m_bitmap_size; ++i) {
+				m_tmp_bitmap[i + j * m_bitmap_size] = 
+					get(i, j)
+					|| get(i + 1, j)
+					|| get(i - 1, j)
+					|| get(i, j - 1)
+					|| get(i + 1, j - 1)
+					|| get(i - 1, j - 1)
+					|| get(i, j + 1)
+					|| get(i + 1, j + 1)
+					|| get(i - 1, j + 1);
+			}
+		}
+
+		for (u32 i = 0; i < m_bitmap_size * m_bitmap_size; ++i) {
+			m_bitmap[i] = m_tmp_bitmap[i];
+		}
+	}
+
+	void invertMask(u32 size) {
+		for (u8& v : m_bitmap) {
+			v = ~v;
+		}
+	}
 
 	void clearMask(u32 size) {
 		m_bitmap.resize(size * size);
@@ -1611,7 +1673,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 	}
 
-	void place(lua_State* L) {
+	void placePrefabs(lua_State* L) {
 		float spacing;
 		if (!LuaWrapper::checkField(L, 1, "spacing", &spacing)) {
 			luaL_error(L, "missing `spacing`");
