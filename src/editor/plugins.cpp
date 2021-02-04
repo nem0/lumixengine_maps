@@ -1575,7 +1575,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 	}
 
-	void invertMask(u32 size) {
+	void invertMask() {
 		for (u8& v : m_bitmap) {
 			v = ~v;
 		}
