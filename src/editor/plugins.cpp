@@ -1558,7 +1558,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		for (i32 j = 0; j < (i32)m_bitmap_size; ++j) {
 			for (i32 i = 0; i < (i32)m_bitmap_size; ++i) {
 				m_tmp_bitmap[i + j * m_bitmap_size] = 
-					get(i, j)
+					(get(i, j)
 					|| get(i + 1, j)
 					|| get(i - 1, j)
 					|| get(i, j - 1)
@@ -1566,7 +1566,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 					|| get(i - 1, j - 1)
 					|| get(i, j + 1)
 					|| get(i + 1, j + 1)
-					|| get(i - 1, j + 1);
+					|| get(i - 1, j + 1)) ? 0xff : 0;
 			}
 		}
 
@@ -1617,7 +1617,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				DVec2 tmp = toLocal(p);
 				points.push(IVec2((i32)tmp.x, (i32)tmp.y));
 			}
-			raster(value, points, m_bitmap_size, Ref(bitmap));
+			raster(def.inverted ? 0xff : value, points, m_bitmap_size, Ref(bitmap));
 		}
 
 		if (def.inverted) {
