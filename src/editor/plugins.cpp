@@ -215,10 +215,6 @@ struct OSMParser {
 	}
 
 	void getWay(const pugi::xml_node& way, Ref<Array<DVec2>> out) const {
-		WorldEditor& editor = m_app.getWorldEditor();
-		Universe* universe = editor.getUniverse();
-		RenderScene* scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
-		
 		for (pugi::xml_node& c : way.children()) {
 			if (equalStrings(c.name(), "nd")) {
 				DVec2 lat_lon;
@@ -753,13 +749,16 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	void clear()
 	{
-		for (TileData* tile : m_tiles) {
-			m_app.getRenderInterface()->destroyTexture(tile->imagery);
-			m_app.getRenderInterface()->destroyTexture(tile->hm);
-		}
-		for (TileData* tile : m_cache) {
-			m_app.getRenderInterface()->destroyTexture(tile->imagery);
-			m_app.getRenderInterface()->destroyTexture(tile->hm);
+		RenderInterface* ri = m_app.getRenderInterface();
+		if (ri) {
+			for (TileData* tile : m_tiles) {
+				m_app.getRenderInterface()->destroyTexture(tile->imagery);
+				m_app.getRenderInterface()->destroyTexture(tile->hm);
+			}
+			for (TileData* tile : m_cache) {
+				m_app.getRenderInterface()->destroyTexture(tile->imagery);
+				m_app.getRenderInterface()->destroyTexture(tile->hm);
+			}
 		}
 		m_tiles.clear();
 		m_cache.clear();
@@ -895,13 +894,40 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		const double lat = double(tiley2lat(double(m_y + (1 << (m_size - 1))), m_zoom));
 		const double width = 256 * (1 << m_size) * 156543.03 * cos(degreesToRadians(lat)) / (1 << m_zoom);
 		const float scale = float(width / ((1 << m_size) * 256));
-		editor.setProperty(TERRAIN_TYPE, "", -1, "XZ scale", Span(&e, 1), scale);
+		editor.setProperty(TERRAIN_TYPE, "", -1, "XZ scale", Span(&e, 1), scale / m_scale_hm);
 	}
 
 	bool createHeightmap(const char* material_path, int size)
 	{
 		
 		return true;
+	}
+
+	void rescale(Array<u16>& raw, i32 map_size, i32 scale) {
+		Array<u16> tmp(m_app.getAllocator());
+		const i32 stride = map_size * scale;
+		tmp.resize(map_size * map_size * scale * scale);
+		for (i32 j = 0; j < (map_size - 1) * scale; ++j) {
+			for (i32 i = 0; i < (map_size - 1) * scale; ++i) {
+				const i32 m = i / scale;
+				const i32 n = j / scale;
+				const u16 h00 = raw[m + n * map_size];
+				const u16 h10 = raw[m + 1 + n * map_size];
+				const u16 h01 = raw[m + (n + 1) * map_size];
+				const u16 h11 = raw[m + 1 + (n + 1) * map_size];
+
+				const float tx = (i - m * scale) / (float)scale;
+				const float ty = (j - n * scale) / (float)scale;
+
+				const float h = lerp(
+					lerp((float)h00, (float)h10, tx),
+					lerp((float)h01, (float)h11, tx),
+					ty);
+				tmp[i + j * stride] = u16(h + 0.5f);
+			}
+		}
+		raw.resize(tmp.size());
+		memcpy(raw.begin(), tmp.begin(), tmp.byte_size());
 	}
 
 	void save()
@@ -991,9 +1017,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		header.channel_type = RawTextureHeader::ChannelType::U16;
 		header.depth = 1;
 		header.is_array = false;
-		header.width = map_size;
-		header.height = map_size;
+		header.width = map_size * m_scale_hm;
+		header.height = map_size * m_scale_hm;
 		bool success = file.write(&header, sizeof(header));
+		if (m_scale_hm > 1) {
+			rescale(raw, map_size, m_scale_hm);
+		}
 		success = file.write(&raw[0], raw.byte_size()) && success;
 		if (!success) {
 			logError("Could not write ", m_out_path);
@@ -1496,6 +1525,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		REGISTER(placePrefabs);
 		REGISTER(paintGrass);
 		REGISTER(paintGround);
+		REGISTER(flattenPolylines);
 
 		LuaWrapper::execute(L, Span(src, src + stringLength(src)), "maps", 0);
 		lua_close(L);
@@ -1614,7 +1644,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			m_osm_parser.getWay(w, Ref(polygon));
 
 			for (const DVec2 p : polygon) {
-				DVec2 tmp = toLocal(p);
+				DVec2 tmp = toBitmap(p);
 				points.push(IVec2((i32)tmp.x, (i32)tmp.y));
 			}
 			raster(def.inverted ? 0xff : value, points, m_bitmap_size, Ref(bitmap));
@@ -1627,10 +1657,18 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 	}
 
-	DVec2 toLocal(const DVec2& p) const {
+	DVec2 toBitmap(const DVec2& p) const {
 		DVec2 tmp;
 		tmp.x = p.x  / m_osm_parser.m_scale * (float)m_bitmap_size;
 		tmp.y = (1 - p.y  / m_osm_parser.m_scale) * (float)m_bitmap_size;
+		return tmp;
+	}
+
+	DVec3 toBitmap(const DVec3& p) const {
+		DVec3 tmp;
+		tmp.x = p.x  / m_osm_parser.m_scale * (float)m_bitmap_size;
+		tmp.y = p.y;
+		tmp.z = (1 - p.z  / m_osm_parser.m_scale) * (float)m_bitmap_size;
 		return tmp;
 	}
 
@@ -1642,6 +1680,174 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	void unmaskPolylines(lua_State* L) {
 		const WayDef def(L);
 		rasterPolylines(0, def);
+	}
+
+	struct Tri2D {
+		Vec2 points[3];
+	};
+
+	struct Quad2D {
+		Quad2D(i32 i, i32 j) {
+			center = Vec2(i + 0.5f, j + 0.5f);
+			a1 = Vec2(0.5f, 0);
+			a2 = Vec2(0, 0.5f);
+		}
+
+		Quad2D(const Vec2& a, const Vec2& b, float w) {
+			center = (a + b) * 0.5f;
+			a1 = (b - a) * 0.5f;
+			a2 = Vec2(-a1.y, a1.x).normalized() * w;
+		}
+
+		void getPoints(Vec2* out) const {
+			out[0] = center + a1 + a2;
+			out[1] = center + a1 - a2;
+			out[2] = center - a1 - a2;
+			out[3] = center - a1 + a2;
+		}
+
+		void getEdge(i32 i, Vec2& lp, Vec2& ln) const {
+			switch(i) {
+				case 0:
+					lp = center + a1;
+					ln = a1;
+					break;
+				case 1:
+					lp = center - a1;
+					ln = -a1;
+					break;
+				case 2:
+					lp = center + a2;
+					ln = a2;
+					break;
+				case 3:
+					lp = center - a2;
+					ln = -a2;
+					break;
+			}
+		}
+
+		bool intersect(const Quad2D& b) const {
+			if (!intersectHelper(b)) return false;
+			if (!b.intersectHelper(*this)) return false;
+			return true;
+		}
+
+		void getTris(Tri2D& t0, Tri2D& t1) {
+			t0.points[0] = center + a1 + a2;
+			t0.points[1] = center + a1 - a2;
+			t0.points[1] = center - a1 + a2;
+
+			t1.points[0] = center - a1 - a2;
+			t1.points[1] = center + a1 - a2;
+			t1.points[1] = center - a1 + a2;
+		}
+
+		bool intersectHelper(const Quad2D& b) const {
+			Vec2 ps[4];
+			b.getPoints(ps);
+
+			for (i32 j = 0; j < 4; ++j) {
+				Vec2 lp, ln;
+				getEdge(j, lp, ln);
+				bool any = false;
+				for (i32 i = 0; i < 4; ++i) {
+					any = any || dotProduct(ps[i] - lp, ln) < 0;
+				}
+				if (!any) return false;
+			}
+			return true;
+		}
+
+		Vec2 center;
+		Vec2 a1;
+		Vec2 a2;
+	};
+
+	void flattenLine(const DVec3& a, const DVec3& b, const Terrain* terrain, float line_width) {
+		if (!terrain) {
+			logError("No terrain");
+			return;
+		}
+		if ((b - a).squaredLength() > 100) {
+			DVec3 mid = (a + b) * 0.5f;
+			mid.y = terrain->getHeight((float)mid.x, (float)mid.z);
+			flattenLine(a, mid, terrain, line_width);
+			flattenLine(b, mid, terrain, line_width);
+			return;
+		}
+
+		ASSERT(terrain->m_heightmap->format == gpu::TextureFormat::R16);
+		u16* ptr = (u16*)terrain->m_heightmap->data.getMutableData();
+		const u32 stride = terrain->m_heightmap->width;
+
+		const Vec2 l0n = a.toFloat().xz() / terrain->getSize();
+		const Vec2 l1n = b.toFloat().xz() / terrain->getSize();
+		const Vec2 min = minimum(l0n, l1n);
+		const Vec2 max = maximum(l0n, l1n);
+
+		const float s = float(terrain->m_width - 1);
+		const Vec2 border(line_width * 0.5f / terrain->m_scale.x);
+		const IVec2 from = IVec2(min * s - border);
+		const IVec2 to = IVec2(max * (s + 1) + border);
+		const Vec2 l0 = l0n * s;
+		const Vec2 l1 = l1n * s;
+
+		auto set = [&](i32 i, i32 j){
+			const Vec2 p = Vec2((float)i, (float)j);
+			float t = dotProduct((p - l0), (l1 - l0).normalized()) / (l1 - l0).length();
+			t = clamp(t, 0.f, 1.f);
+			ptr[i + j * stride] = u16(lerp(a, b, t).y / terrain->m_scale.y * 0xffff);
+		};
+
+		Quad2D l(l0, l1, line_width * 0.5f / terrain->m_scale.x);
+		for (i32 j = from.y; j <= to.y; ++j) {
+			for (i32 i = from.x; i <= to.x; ++i) {
+				Quad2D ij(i, j);
+				if (!ij.intersect(l)) continue;
+
+				Tri2D t0, t1;
+				ij.getTris(t0, t1);
+				set(i, j);
+				set(i + 1, j + 1);
+				set(i, j + 1);
+				set(i + 1, j);
+/*
+				if (l.intersect(t0)) {
+					ptr[i + j * stride] = 0;
+					ptr[i + 1 + j * stride] = 0;
+					ptr[i + j * stride] = 0;
+				}
+
+				if (l.intersect(t1)) {
+					ptr[i + j * stride] = 0;
+					ptr[i + j * stride] = 0;
+					ptr[i + j * stride] = 0;
+				}*/
+			}
+		}
+	}
+
+	void flattenPolylines(lua_State* L) {
+		const WayDef def(L);
+		Array<DVec3> polyline(m_app.getAllocator());
+		const EntityPtr terrain_entity = getTerrain();
+		if (!terrain_entity.isValid()) luaL_error(L, "no terrain is selected");
+		const Terrain* terrain = getSelectedTerrain();
+		if (!terrain->m_heightmap) luaL_error(L, "heightmap missing");
+		if (!terrain->m_heightmap->isReady()) luaL_error(L, "heightmap is not ready");
+
+		for (pugi::xml_node& w : m_osm_parser.m_ways) {
+			if (!OSMParser::hasTag(w, def.key, def.value)) continue;
+
+			polyline.clear();
+			m_osm_parser.getWay(w, (EntityRef)terrain_entity, Ref(polyline));
+
+			for (i32 i = 0; i < polyline.size() - 1; ++i) {
+				flattenLine(polyline[i], polyline[i + 1], terrain, 5.f);
+			}
+		}
+		terrain->m_heightmap->onDataUpdated(0, 0, terrain->m_heightmap->width, terrain->m_heightmap->height);
 	}
 
 	void rasterPolylines(u8 value, const WayDef& def) {
@@ -1658,8 +1864,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			polyline.clear();
 			m_osm_parser.getWay(w, Ref(polyline));
 			for (i32 i = 0; i < polyline.size() - 1; ++i) {
-				const DVec2 a = toLocal(polyline[i]);
-				const DVec2 b = toLocal(polyline[i + 1]);
+				const DVec2 a = toBitmap(polyline[i]);
+				const DVec2 b = toBitmap(polyline[i + 1]);
 				const IVec2 ia = IVec2((i32)a.x, (i32)a.y);
 				const IVec2 ib = IVec2((i32)b.x, (i32)b.y);
 				raster(value, ia, ib, m_bitmap_size, Ref(bitmap));
@@ -1921,6 +2127,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			ImGui::Text("Heightmap might have artifacts at this level.");
 		}
 
+		ImGuiEx::Label("Heightmap scale");
+		ImGui::InputInt("##hmscale", &m_scale_hm);
 		ImGuiEx::Label("Output");
 		if (ImGui::Button(StaticString<LUMIX_MAX_PATH + 128>(m_out_path[0] ? m_out_path : "Click to set"), ImVec2(-1, 0))) {
 			browse();
@@ -2051,6 +2259,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	bool m_open = false;
 	bool m_is_download_deferred = true;
 	int m_zoom = 1;
+	int m_scale_hm = 1;
 	int m_x = 0;
 	int m_y = 0;
 	IVec2 m_offset{0, 0};
