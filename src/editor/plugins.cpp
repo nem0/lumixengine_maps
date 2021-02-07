@@ -684,10 +684,22 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	
 	void onBeforeSettingsSaved() override {
 		m_app.getSettings().setValue("is_maps_plugin_open", m_open);
+		m_app.getSettings().setValue("maps_x", m_x);
+		m_app.getSettings().setValue("maps_y", m_y);
+		m_app.getSettings().setValue("maps_zoom", m_zoom);
+		m_app.getSettings().setValue("maps_offset_x", m_offset.x);
+		m_app.getSettings().setValue("maps_offset_y", m_offset.y);
+		m_app.getSettings().setValue("maps_size", m_size);
 	}
 
 	void onSettingsLoaded() override {
 		m_open = m_app.getSettings().getValue("is_maps_plugin_open", false);
+		m_x = m_app.getSettings().getValue("maps_x", 0);
+		m_y = m_app.getSettings().getValue("maps_y", 0);
+		m_zoom = m_app.getSettings().getValue("maps_zoom", 1);
+		m_offset.x = m_app.getSettings().getValue("maps_offset_x", 0);
+		m_offset.y = m_app.getSettings().getValue("maps_offset_y", 0);
+		m_size = m_app.getSettings().getValue("maps_size", 1);
 		const u32 len = m_app.getSettings().getValue("maps_script", Span(m_script));
 		if (len == 0) m_script[0] = '\0';
 		if (len >= lengthOf(m_script)) {
