@@ -270,9 +270,9 @@ struct OSMParser {
 			res.center += polygon[i];
 		}
 		res.center /= polygon.size();
-		Vec3 dir = (polygon[0] - polygon[1]).toFloat();
+		Vec3 dir = Vec3(polygon[0] - polygon[1]);
 		dir.y = 0;
-		dir.normalize();
+		dir = normalize(dir);
 		res.yaw = atan2(dir.x, dir.z);
 
 		i32 max = 0;
@@ -300,9 +300,9 @@ struct OSMParser {
 				
 					polygon.erase(i);
 					
-					out->push({a.toFloat(), abgr});
-					out->push({b.toFloat(), abgr});
-					out->push({c.toFloat(), abgr});
+					out->push({Vec3(a), abgr});
+					out->push({Vec3(b), abgr});
+					out->push({Vec3(c), abgr});
 					
 					break;
 				}
@@ -358,14 +358,14 @@ struct OSMParser {
 		if (points.empty()) return;
 
 		for(i32 i = 0; i < points.size() - 1; ++i) {	
-			Vec3 a = points[i].toFloat();
-			Vec3 b = points[i + 1].toFloat();
+			Vec3 a = Vec3(points[i]);
+			Vec3 b = Vec3(points[i + 1]);
 			clip(Ref(a), Ref(b), m_scale);
 			clip(Ref(b), Ref(a), m_scale);
 
-			if ((a-b).squaredLength() < 0.01f) continue;
+			if (squaredLength(a-b) < 0.01f) continue;
 
-			Vec3 norm = crossProduct(a - b, Vec3(0, 1, 0)).normalized();
+			Vec3 norm = normalize(cross(a - b, Vec3(0, 1, 0)));
 			out->push({a - norm * 2, color});
 			out->push({b - norm * 2, color});
 			out->push({b + norm * 2, color});
@@ -1708,7 +1708,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		Quad2D(const Vec2& a, const Vec2& b, float w) {
 			center = (a + b) * 0.5f;
 			a1 = (b - a) * 0.5f;
-			a2 = Vec2(-a1.y, a1.x).normalized() * w;
+			a2 = normalize(Vec2(-a1.y, a1.x)) * w;
 		}
 
 		void getPoints(Vec2* out) const {
@@ -1764,7 +1764,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				getEdge(j, lp, ln);
 				bool any = false;
 				for (i32 i = 0; i < 4; ++i) {
-					any = any || dotProduct(ps[i] - lp, ln) < 0;
+					any = any || dot(ps[i] - lp, ln) < 0;
 				}
 				if (!any) return false;
 			}
@@ -1781,7 +1781,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			logError("No terrain");
 			return;
 		}
-		if ((b - a).squaredLength() > 100) {
+		if (squaredLength(b - a) > 100) {
 			DVec3 mid = (a + b) * 0.5f;
 			mid.y = terrain->getHeight((float)mid.x, (float)mid.z);
 			flattenLine(a, mid, terrain, line_width);
@@ -1793,8 +1793,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		u16* ptr = (u16*)terrain->m_heightmap->data.getMutableData();
 		const u32 stride = terrain->m_heightmap->width;
 
-		const Vec2 l0n = a.toFloat().xz() / terrain->getSize();
-		const Vec2 l1n = b.toFloat().xz() / terrain->getSize();
+		const Vec2 l0n = Vec3(a).xz() / terrain->getSize();
+		const Vec2 l1n = Vec3(b).xz() / terrain->getSize();
 		const Vec2 min = minimum(l0n, l1n);
 		const Vec2 max = maximum(l0n, l1n);
 
@@ -1807,7 +1807,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		auto set = [&](i32 i, i32 j){
 			const Vec2 p = Vec2((float)i, (float)j);
-			float t = dotProduct((p - l0), (l1 - l0).normalized()) / (l1 - l0).length();
+			float t = dot((p - l0), normalize(l1 - l0)) / length(l1 - l0);
 			t = clamp(t, 0.f, 1.f);
 			ptr[i + j * stride] = u16(lerp(a, b, t).y / terrain->m_scale.y * 0xffff);
 		};
@@ -2043,7 +2043,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		if (!m_osm_lines.empty()) {
 			UniverseView& view = m_app.getWorldEditor().getView();
-			const Vec3 cam_pos = view.getViewport().pos.toFloat();
+			const Vec3 cam_pos = Vec3(view.getViewport().pos);
 			UniverseView::Vertex* v = view.render(true, m_osm_lines.size());
 			for (i32 i = 0; i < m_osm_lines.size(); ++i) {
 				v[i].pos = m_osm_lines[i] - cam_pos;
@@ -2053,7 +2053,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		if (!m_osm_tris.empty()) {
 			UniverseView& view = m_app.getWorldEditor().getView();
-			const Vec3 cam_pos = view.getViewport().pos.toFloat();
+			const Vec3 cam_pos = Vec3(view.getViewport().pos);
 			UniverseView::Vertex* v = view.render(false, m_osm_tris.size());
 			for (i32 i = 0; i < m_osm_tris.size(); ++i) {
 				v[i].pos = m_osm_tris[i].pos - cam_pos;
