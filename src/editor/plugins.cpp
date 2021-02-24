@@ -608,8 +608,8 @@ struct OSMParser {
 		if (points.empty()) return;
 
 		for(i32 i = 0; i < points.size() - 1; ++i) {	
-			Vec3 a = Vec3(points[i]);
-			Vec3 b = Vec3(points[i + 1]);
+			Vec3 a = Vec3(points[i]) + Vec3(0, 1, 0);
+			Vec3 b = Vec3(points[i + 1]) + Vec3(0, 1, 0);
 			clip(Ref(a), Ref(b), m_scale);
 			clip(Ref(b), Ref(a), m_scale);
 
@@ -1661,7 +1661,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 	}
 
-	void raster(u8 value, const Array<IVec2>& points, u32 w, Ref<Array<u8>> out) {
+	void raster(const Array<IVec2>& points, u32 w, i32 change, Ref<Array<u8>> out) {
 		// naive polygon rasterization
 		if (points.empty()) return;
 
@@ -1688,7 +1688,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				nodeX[i] = clamp(nodeX[i], 0, w);
 				nodeX[i + 1] = clamp(nodeX[i + 1], 0, w);
 				for (i32 pixelX = nodeX[i]; pixelX < nodeX[i + 1]; pixelX++) {
-					out.value[pixelX + pixelY * w] = value;
+					u8& v = out.value[pixelX + pixelY * w];
+					v = (u8)clamp(i32(v) + change, 0, 255);
 				}
 			}
 		}
@@ -1804,7 +1805,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 					&& get(i - 1, j - 1)
 					&& get(i, j + 1)
 					&& get(i + 1, j + 1)
-					&& get(i - 1, j + 1)) ? 0xff : 0;
+					&& get(i - 1, j + 1)) ? 1 : 0;
 			}
 		}
 
@@ -1834,7 +1835,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 					|| get(i - 1, j - 1)
 					|| get(i, j + 1)
 					|| get(i + 1, j + 1)
-					|| get(i - 1, j + 1)) ? 0xff : 0;
+					|| get(i - 1, j + 1)) ? 1 : 0;
 			}
 		}
 
@@ -1864,20 +1865,20 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	void maskPolygons(lua_State* L) {
 		const WayDef def(L);
-		rasterPolygons(0xff, def);
+		rasterPolygons(def, true);
 	}
 
 	void unmaskPolygons(lua_State* L) {
 		const WayDef def(L);
-		rasterPolygons(0, def);
+		rasterPolygons(def, false);
 	}
 
-	void rasterPolygons(u8 value, const WayDef& def) {
+	void rasterPolygons(const WayDef& def, bool mask) {
 		Array<DVec2> polygon(m_app.getAllocator());
 		Array<IVec2> points(m_app.getAllocator());
 		
-		Array<u8>& bitmap = def.inverted ? m_tmp_bitmap : m_bitmap;
-		if (def.inverted) {
+		Array<u8>& bitmap = !def.inverted && mask ? m_bitmap : m_tmp_bitmap;
+		if (def.inverted || !mask) {
 			memset(m_tmp_bitmap.begin(), 0, m_tmp_bitmap.byte_size());
 		}
 
@@ -1887,12 +1888,22 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			
 			m_osm_parser.getMultipolygon(r, multipolygon);
 
-			for (const Polygon2D& p : multipolygon.outer_polygons) {
+			for (const Polygon2D& polygon : multipolygon.outer_polygons) {
+				points.clear();
+				for (const DVec2 p : polygon) {
+					const DVec2 tmp = toBitmap(p);
+					points.push(IVec2((i32)tmp.x, (i32)tmp.y));
+				}
+				raster(points, m_bitmap_size, 1, Ref(bitmap));
+			}
+			
+			for (const Polygon2D& polygon : multipolygon.inner_polygons) {
+				points.clear();
 				for (const DVec2 p : polygon) {
 					DVec2 tmp = toBitmap(p);
 					points.push(IVec2((i32)tmp.x, (i32)tmp.y));
 				}
-				raster(def.inverted ? 0xff : value, points, m_bitmap_size, Ref(bitmap));
+				raster(points, m_bitmap_size, -1, Ref(bitmap));
 			}
 		}
 
@@ -1907,12 +1918,24 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				DVec2 tmp = toBitmap(p);
 				points.push(IVec2((i32)tmp.x, (i32)tmp.y));
 			}
-			raster(def.inverted ? 0xff : value, points, m_bitmap_size, Ref(bitmap));
+			raster(points, m_bitmap_size, 1, Ref(bitmap));
 		}
 
 		if (def.inverted) {
+			if (mask) {
+				for (u32 i = 0, c = m_bitmap_size * m_bitmap_size; i < c; ++i) {
+					if (m_tmp_bitmap[i] == 0) m_bitmap[i] = 1;
+				}
+			}
+			else {
+				for (u32 i = 0, c = m_bitmap_size * m_bitmap_size; i < c; ++i) {
+					if (m_tmp_bitmap[i] == 0) m_bitmap[i] = 0;
+				}
+			}
+		}
+		else if (!mask) {
 			for (u32 i = 0, c = m_bitmap_size * m_bitmap_size; i < c; ++i) {
-				if (m_tmp_bitmap[i] == 0) m_bitmap[i] = value;
+				if (m_tmp_bitmap[i] == 1) m_bitmap[i] = 0;
 			}
 		}
 	}
@@ -1934,7 +1957,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	void maskPolylines(lua_State* L) {
 		const WayDef def(L);
-		rasterPolylines(0xff, def);
+		rasterPolylines(1, def);
 	}
 
 	void unmaskPolylines(lua_State* L) {
@@ -2171,7 +2194,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		for (float y = 0; y < m_bitmap_size; y += spacing) {
 			for (float x = 0; x < m_bitmap_size; x += spacing) {
-				if (m_bitmap[i32(x) + i32(y) * m_bitmap_size] != 0xff) continue;
+				if (m_bitmap[i32(x) + i32(y) * m_bitmap_size] == 0) continue;
 
 				DVec3 pos;
 				pos.x = (x + spacing * randFloat() * 0.9f - 0.45f) / (float)m_bitmap_size * m_osm_parser.m_scale;
@@ -2189,7 +2212,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		for (u32 i = 0; i < (u32)prefabs.size(); ++i) {
-			m_app.getWorldEditor().getPrefabSystem().instantiatePrefabs(*prefabs[i], transforms[i]);
+			if (!transforms[i].empty()) m_app.getWorldEditor().getPrefabSystem().instantiatePrefabs(*prefabs[i], transforms[i]);
 			prefabs[i]->decRefCount();
 		}
 	}
