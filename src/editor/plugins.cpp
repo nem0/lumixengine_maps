@@ -108,6 +108,7 @@ struct OSMParser {
 		: m_app(app) 
 		, m_nodes(m_app.getAllocator())
 		, m_ways(m_app.getAllocator())
+		, m_relations(m_app.getAllocator())
 	{}
 
 	bool getLatLon(pugi::xml_node nd_ref, Ref<DVec2> p) const {
@@ -257,13 +258,8 @@ struct OSMParser {
 		return true;
 	}
 
-	BoundingBox createAreaMesh(const pugi::xml_node& way, EntityRef terrain, u32 abgr, Ref<Array<UniverseView::Vertex>> out, IAllocator& allocator) const {
-		Array<DVec3> polygon(allocator);
-		getWay(way, terrain, Ref(polygon));
+	BoundingBox createAreaMesh(Array<DVec3>& polygon, EntityRef terrain, u32 abgr, Ref<Array<UniverseView::Vertex>> out, IAllocator& allocator) const {
 		if (polygon.size() < 3) return {};
-
-		polygon.pop();
-
 		BoundingBox res;
 		res.center = DVec3(0);
 		for (i32 i = 0, c = polygon.size(); i < c; ++i) {
@@ -290,7 +286,8 @@ struct OSMParser {
 		RenderInterface* ri = m_app.getRenderInterface();
 		Universe* universe = m_app.getWorldEditor().getUniverse();
 
-		while (polygon.size() > 2) {
+		while (polygon.size() > 3) {
+			const i32 size = polygon.size(); 
 			for (i32 i = 0, c = polygon.size() - 1; i < c; ++i) {
 				if (isEar(polygon, i, side_negative)) {
 					const i32 s = polygon.size();
@@ -307,30 +304,17 @@ struct OSMParser {
 					break;
 				}
 			}
+			if (polygon.size() == size) {
+				logError("Failed to triangulate polygon, ", polygon.size(), " points remaining.");
+				break;
+			}
+		}
+		if (polygon.size() == 3) {
+			out->push({Vec3(polygon[0]), abgr});
+			out->push({Vec3(polygon[1]), abgr});
+			out->push({Vec3(polygon[2]), abgr});
 		}
 		return res;
-/*		
-		pugi::xml_node nd_ref = way.first_child();
-		DVec3 pos;
-		if (!toPos(nd_ref, Ref(pos))) return;
-
-		// geom
-		DVec3 min_pos(m_min_lon, 0, m_min_lat);
-		DVec3 prev;
-		pugi::xml_node n = nd_ref;
-		if (!toPos(n, Ref(prev))) return;
-		const DVec3 first = prev;
-		Array<DVec3> vertices(allocator);
-		for(;;) {
-			pugi::xml_node next = n.next_sibling();
-			if (next.empty() || !equalStrings(next.name(), "nd")) break;
-			DVec3 p;
-			if (!toPos(next, Ref(p))) break;
-			vertices.push(p);
-
-			prev = p;
-			n = next;
-		}*/
 	}
 
 	void clip(Ref<Vec3> a, Ref<Vec3> b, float max) const {
@@ -379,6 +363,7 @@ struct OSMParser {
 	void parseOSM(double left, double bottom, double right, double top, float scale) {
 		m_nodes.clear();
 		m_ways.clear();
+		m_relations.clear();
 		os::InputFile file;
 		StaticString<LUMIX_MAX_PATH> path(m_app.getEngine().getFileSystem().getBasePath(), "map.osm");
 		if (!file.open(path)) return;
@@ -417,6 +402,15 @@ struct OSMParser {
 				fromCString(Span(id_str, stringLength(id_str)), Ref(id));
 				m_ways.insert(id, n);
 			}
+			else if (equalStrings(n.name(), "relation")) {
+				pugi::xml_attribute id_attr = n.attribute("id");
+				if (id_attr.empty()) continue;
+
+				const char* id_str = id_attr.value();
+				u64 id;
+				fromCString(Span(id_str, stringLength(id_str)), Ref(id));
+				m_relations.insert(id, n);
+			}
 		}
 		
 		/*for (pugi::xml_node w : m_ways) {
@@ -429,6 +423,7 @@ struct OSMParser {
 	pugi::xml_document m_doc;
 	HashMap<u64, pugi::xml_node> m_nodes;
 	HashMap<u64, pugi::xml_node> m_ways;
+	HashMap<u64, pugi::xml_node> m_relations;
 	double m_min_lat = 0;
 	double m_min_lon = 0;
 	double m_lat_range = 0.5f;
@@ -2017,6 +2012,18 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		splatmap->onDataUpdated(0, 0, splatmap->width, splatmap->height);
 	}
 
+	void getRelationPolygons(const pugi::xml_node& relation, Array<Array<DVec3>>& polygons, EntityRef terrain) {
+		Array<Array<DVec3>> polylines(m_app.getAllocator());
+		forEachWayInRelation(relation, [&](const pugi::xml_node& w){
+			Array<DVec3>& polygon = polylines.emplace(m_app.getAllocator());
+			m_osm_parser.getWay(w, terrain, Ref(polygon));
+		});
+		polygons.clear();
+		while(!polylines.empty()) {
+			mergePolylines(polylines, polygons.emplace(m_app.getAllocator()));
+		}
+	}
+
 	void OSMGUI() {
 		double bottom = double(tiley2lat(double(m_y - m_offset.y / 256.0), m_zoom));
 		double left = double(tilex2long(double(m_x - m_offset.x / 256.0), m_zoom));
@@ -2093,21 +2100,42 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		if (terrain.isValid()) {
 			if (ImGui::Button("Show Area")) {
 				const ComponentType model_instance_type = reflection::getComponentType("model_instance");
+				Array<Array<DVec3>> polygons(m_app.getAllocator());
+				for (pugi::xml_node& r : m_osm_parser.m_relations) {
+					if (!OSMParser::hasTag(r, tag_key, tag_value)) continue;
+					getRelationPolygons(r, polygons, (EntityRef)terrain);
+					for (auto& p : polygons) {
+						m_osm_parser.createAreaMesh(p, (EntityRef)terrain, randomColor().abgr(), Ref(m_osm_tris), m_app.getAllocator());
+					}
+				}
+				polygons.clear();
+				polygons.emplace(m_app.getAllocator());
 				for (pugi::xml_node& w : m_osm_parser.m_ways) {
 					if (!OSMParser::hasTag(w, tag_key, tag_value)) continue;
-					m_osm_parser.createAreaMesh(w, (EntityRef)terrain, randomColor().abgr(), Ref(m_osm_tris), m_app.getAllocator());
+					polygons.back().clear();
+					m_osm_parser.getWay(w, (EntityRef)terrain, Ref(polygons.back()));
+					m_osm_parser.createAreaMesh(polygons.back(), (EntityRef)terrain, randomColor().abgr(), Ref(m_osm_tris), m_app.getAllocator());
 				}
 			}
 
 			ImGui::SameLine();
 			if (ImGui::Button("Show polyline")) {
-				Array<DVec3> polyline(m_app.getAllocator());
+				Array<Array<DVec3>> polygons(m_app.getAllocator());
+				for (pugi::xml_node& r : m_osm_parser.m_relations) {
+					if (!OSMParser::hasTag(r, tag_key, tag_value)) continue;
+					getRelationPolygons(r, polygons, (EntityRef)terrain);
+					for (auto& p : polygons) {
+						m_osm_parser.createPolyline(p, randomColor().abgr(), Ref(m_osm_tris));
+					}
+				}
+				
+				polygons.clear();
+				polygons.emplace(m_app.getAllocator());
 				for (pugi::xml_node& w : m_osm_parser.m_ways) {
 					if (!OSMParser::hasTag(w, tag_key, tag_value)) continue;
-					polyline.clear();
-					m_osm_parser.getWay(w, (EntityRef)terrain, Ref(polyline));
-
-					m_osm_parser.createPolyline(polyline, randomColor().abgr(), Ref(m_osm_tris));
+					polygons.back().clear();
+					m_osm_parser.getWay(w, (EntityRef)terrain, Ref(polygons.back()));
+					m_osm_parser.createPolyline(polygons.back(), randomColor().abgr(), Ref(m_osm_tris));
 				}
 			}
 		}
@@ -2115,6 +2143,67 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		if (ImGui::Button("Reset visualization")) {
 			m_osm_tris.clear();
 			m_osm_lines.clear();
+		}
+	}
+
+	static bool samePoint(const DVec3& a, const DVec3& b) {
+		if (abs(a.x - b.x) > 1e-5) return false;
+		if (abs(a.y - b.y) > 1e-5) return false;
+		if (abs(a.z - b.z) > 1e-5) return false;
+
+		return true;
+	}
+
+	void mergePolylines(Array<Array<DVec3>>& polylines, Array<DVec3>& merged) {
+		merged = polylines.back().move();
+		polylines.pop();
+		while (!polylines.empty()) {
+			const DVec3 end = merged.back();
+			bool found = false;
+			for (Array<DVec3>& i : polylines) {
+				if (samePoint(i[0], end)) {
+					for (int j = 1; j < i.size(); ++j) {
+						merged.push(i[j]);
+					}
+					polylines.erase(u32(&i - polylines.begin()));
+					found = true;
+					break;
+				}
+				else if (samePoint(i.back(), end)) {
+					for (int j = i.size() - 2; j >= 0; --j) {
+						merged.push(i[j]);
+					}
+					polylines.erase(u32(&i - polylines.begin()));
+					found = true;
+					break;
+				}
+			}
+			if (!found) return;
+		}
+	}
+
+	template <typename F>
+	void forEachWayInRelation(const pugi::xml_node& relation, F& f) {
+		for (pugi::xml_node n = relation.first_child(); !n.empty(); n = n.next_sibling()) {
+			if (!equalStrings(n.name(), "member")) continue;
+
+			pugi::xml_attribute type_attr = n.attribute("type");
+			if (type_attr.empty()) continue;
+
+			const char* type_str = type_attr.value();
+			if (!equalStrings(type_str, "way")) continue;
+
+			pugi::xml_attribute ref_attr = n.attribute("ref");
+			if (ref_attr.empty()) continue;
+			
+			const char* ref_str = ref_attr.value();
+			u64 ref;
+			fromCString(Span(ref_str, stringLength(ref_str)), Ref(ref));
+			
+			auto iter = m_osm_parser.m_ways.find(ref);
+			if (!iter.isValid()) continue;
+
+			f(iter.value());
 		}
 	}
 
