@@ -1752,6 +1752,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			lua_setglobal(L, #F);\
 		}
 
+		REGISTER(adjustHeight);
 		REGISTER(clearMask);
 		REGISTER(invertMask);
 		REGISTER(shrinkMask);
@@ -2218,6 +2219,103 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			prefabs[i]->decRefCount();
 		}
 		editor.endCommandGroup();
+	}
+
+	void adjustHeight(const char* texture, float texture_scale, float hm_multiplier) {
+		os::InputFile file;
+		if (!m_app.getEngine().getFileSystem().open(texture, Ref(file))) {
+			logError("Failed to open ", texture);
+			return;
+		}
+		Array<u8> content(m_app.getAllocator());
+		content.resize((u32)file.size());
+		if (!file.read(content.begin(), content.byte_size())) {
+			logError("Failed to read ", texture);
+			file.close();
+			return;
+		}
+		file.close();
+
+		int w, h, ch;
+		stbi_uc* rgba = stbi_load_from_memory(content.begin(), content.byte_size(), &w, &h, &ch, 1);
+		if (!rgba) {
+			logError("Failed to parse ", texture);
+			return;
+		}
+
+		const Terrain* terrain = getSelectedTerrain();
+		if (!terrain) return;
+		
+		Texture* hm = terrain->getHeightmap();
+		if (!hm) {
+			logWarning("Missing heightmap");
+			return;
+		}
+		
+		if (!hm->isReady()) {
+			logWarning("Heightmap ", hm->getPath(), " not ready");
+			return;
+		}
+
+		if (hm->format != gpu::TextureFormat::R16) {
+			logWarning("Heightmap format not supported");
+			return;
+		}
+
+		if (hm_multiplier < 0 || hm_multiplier > 1) {
+			logWarning("Multiplier must be in 0-1 range");
+			return;
+		}
+
+		if (hm->width != m_bitmap_size || hm->height != m_bitmap_size) {
+			logWarning("Heightmap and mask must have the same sizes");
+			return;
+		}
+		u16* hm_data = (u16*)hm->getData();
+
+		auto mix = [](float a, float b, float t) {
+			return a * (1 - t) + b * t;
+		};
+
+		auto sample = [&](u32 i, u32 j) {
+			const float m = float(texture_scale / m_bitmap_size);
+			const float x = i * m;
+			const float y = j * m;
+			const float a = x * w;
+			const float b = y * h;
+			
+			u32 a0 = u32(a);
+			u32 b0 = u32(b);
+			const float tx = a - a0;
+			const float ty = b - b0;
+			a0 = a0 % w;
+			b0 = b0 % w;
+
+			const float v00 = rgba[a0 + b0 * w] / float(0xff);
+			const float v10 = rgba[a0 + 1 + b0 * w] / float(0xff);
+			const float v11 = rgba[a0 + 1 + b0 * w + w] / float(0xff);
+			const float v01 = rgba[a0 + b0 * w + w] / float(0xff);
+
+			return mix(
+				mix(v00, v10, tx),
+				mix(v01, v11, tx),
+				ty
+			);
+		};
+
+		for (u32 j = 0; j < m_bitmap_size; ++j) {
+			for (u32 i = 0; i < m_bitmap_size; ++i) {
+				if (m_bitmap[i + j * m_bitmap_size]) {
+					const u32 idx = i + (m_bitmap_size - j - 1) * m_bitmap_size;
+					float height = (hm_data[idx] / float(0xffFF));
+					height += sample(i, j) * hm_multiplier;
+					hm_data[idx] = (u16)clamp(height * float(0xffFF), 0.f, (float)0xffFF);
+				}
+			}
+		}
+
+		hm->onDataUpdated(0, 0, hm->width, hm->height);
+		stbi_image_free(rgba);
 	}
 
 	void paintGround(u8 ground) {
