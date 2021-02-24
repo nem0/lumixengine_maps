@@ -2211,10 +2211,13 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			fs.processCallbacks();
 		}
 
+		WorldEditor& editor = m_app.getWorldEditor();
+		editor.beginCommandGroup("maps_place_prefabs");
 		for (u32 i = 0; i < (u32)prefabs.size(); ++i) {
-			if (!transforms[i].empty()) m_app.getWorldEditor().getPrefabSystem().instantiatePrefabs(*prefabs[i], transforms[i]);
+			if (!transforms[i].empty()) editor.getPrefabSystem().instantiatePrefabs(*prefabs[i], transforms[i]);
 			prefabs[i]->decRefCount();
 		}
+		editor.endCommandGroup();
 	}
 
 	void paintGround(u8 ground) {
