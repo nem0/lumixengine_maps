@@ -103,13 +103,204 @@ constexpr int TILE_SIZE = 256;
 constexpr int MAX_ZOOM = 18;
 constexpr float MAP_UI_SIZE = 512;
 
+using Polygon = Array<DVec3>;
+using Polygon2D = Array<DVec2>;
+
+struct Multipolygon {
+	Multipolygon(IAllocator& allocator)
+		: outer_polygons(allocator)
+		, inner_polygons(allocator)
+	{} 
+
+	Array<Polygon> outer_polygons;
+	Array<Polygon> inner_polygons;
+};
+
+struct Multipolygon2D {
+	Multipolygon2D(IAllocator& allocator)
+		: outer_polygons(allocator)
+		, inner_polygons(allocator)
+	{} 
+
+	Array<Polygon2D> outer_polygons;
+	Array<Polygon2D> inner_polygons;
+};
+
 struct OSMParser {
+	static bool samePoint(const DVec3& a, const DVec3& b) {
+		if (abs(a.x - b.x) > 1e-5) return false;
+		if (abs(a.y - b.y) > 1e-5) return false;
+		if (abs(a.z - b.z) > 1e-5) return false;
+
+		return true;
+	}
+
+	static bool samePoint(const DVec2& a, const DVec2& b) {
+		if (abs(a.x - b.x) > 1e-5) return false;
+		if (abs(a.y - b.y) > 1e-5) return false;
+
+		return true;
+	}
+
+	static void mergePolylines(Array<Polygon>& polylines, Polygon& merged) {
+		merged = polylines.back().move();
+		polylines.pop();
+		while (!polylines.empty()) {
+			const DVec3 end = merged.back();
+			bool found = false;
+			for (Polygon& i : polylines) {
+				if (samePoint(i[0], end)) {
+					for (int j = 1; j < i.size(); ++j) {
+						merged.push(i[j]);
+					}
+					polylines.erase(u32(&i - polylines.begin()));
+					found = true;
+					break;
+				}
+				else if (samePoint(i.back(), end)) {
+					for (int j = i.size() - 2; j >= 0; --j) {
+						merged.push(i[j]);
+					}
+					polylines.erase(u32(&i - polylines.begin()));
+					found = true;
+					break;
+				}
+			}
+			if (!found) return;
+		}
+	}
+
+	static void mergePolylines(Array<Polygon2D>& polylines, Polygon2D& merged) {
+		merged = polylines.back().move();
+		polylines.pop();
+		while (!polylines.empty()) {
+			const DVec2 end = merged.back();
+			bool found = false;
+			for (Polygon2D& i : polylines) {
+				if (samePoint(i[0], end)) {
+					for (int j = 1; j < i.size(); ++j) {
+						merged.push(i[j]);
+					}
+					polylines.erase(u32(&i - polylines.begin()));
+					found = true;
+					break;
+				}
+				else if (samePoint(i.back(), end)) {
+					for (int j = i.size() - 2; j >= 0; --j) {
+						merged.push(i[j]);
+					}
+					polylines.erase(u32(&i - polylines.begin()));
+					found = true;
+					break;
+				}
+			}
+			if (!found) return;
+		}
+	}
+
+	static bool hasAttributeValue(pugi::xml_node n, const char* key, const char* value) {
+		pugi::xml_attribute attr = n.attribute(key);
+		if (attr.empty()) return false;
+
+		const char* str = attr.value();
+		return equalStrings(str, value);
+	}
+
+	template <typename T>
+	static bool getAttributeValue(pugi::xml_node n, const char* key, Ref<T> out) {
+		pugi::xml_attribute attr = n.attribute(key);
+		if (attr.empty()) return false;
+		const char* str = attr.value();
+		fromCString(Span(str, stringLength(str)), out);
+		return true;
+	}
+
+	static Color randomColor() {
+		// HSV to RGB with S=1,V=1,H=random
+		const i32 H = rand(0, 360);
+		const u8 X = u8(clamp(255 * (1 - abs(fmodf(H / 60.0f, 2) - 1)), 0.f, 255.f) + 0.5);
+
+		Color res(0);
+		res.a = 0xff;
+
+		if(H >= 0 && H < 60) {
+			res.r = 255;
+			res.g = X;
+		}
+		else if(H >= 60 && H < 120) {	
+			res.r = X;
+			res.g = 255;
+		}
+		else if(H >= 120 && H < 180) {
+			res.g = 255;
+			res.b = X;	
+		}
+		else if(H >= 180 && H < 240) {
+			res.g = X;
+			res.b = 255;	
+		}
+		else if(H >= 240 && H < 300) {
+			res.r = X;
+			res.b = 255;	
+		}
+		else {
+			res.r = 255;
+			res.b = X;	
+		}
+		return res;
+	}
+
 	OSMParser(StudioApp& app)
 		: m_app(app) 
 		, m_nodes(m_app.getAllocator())
 		, m_ways(m_app.getAllocator())
 		, m_relations(m_app.getAllocator())
 	{}
+
+	void showPolylines(const char* tag_key, const char* tag_value, EntityRef terrain, Ref<Array<UniverseView::Vertex>> out) {
+		IAllocator& allocator = m_app.getAllocator();
+		Multipolygon multipolygon(allocator);
+		for (pugi::xml_node& r : m_relations) {
+			if (!hasTag(r, tag_key, tag_value)) continue;
+
+			getMultipolygon(r, multipolygon, (EntityRef)terrain);
+			for (const Polygon& p : multipolygon.outer_polygons) {
+				createPolyline(p, randomColor().abgr(), out);
+			}
+		}
+				
+		Polygon polygon(allocator);
+		for (pugi::xml_node& w : m_ways) {
+			if (!hasTag(w, tag_key, tag_value)) continue;
+
+			polygon.clear();
+			getWay(w, (EntityRef)terrain, Ref(polygon));
+			createPolyline(polygon, randomColor().abgr(), out);
+		}	
+	}
+
+	void showAreas(const char* tag_key, const char* tag_value, EntityRef terrain, Ref<Array<UniverseView::Vertex>> out) {
+		const ComponentType model_instance_type = reflection::getComponentType("model_instance");
+		IAllocator& allocator = m_app.getAllocator();
+		Multipolygon multipolygon(allocator);
+		for (pugi::xml_node& r : m_relations) {
+			if (!hasTag(r, tag_key, tag_value)) continue;
+
+			getMultipolygon(r, multipolygon, terrain);
+			for (Polygon& p : multipolygon.outer_polygons) {
+				createAreaMesh(p, terrain, randomColor().abgr(), out, allocator);
+			}
+		}
+
+		Polygon polygon(allocator);
+		for (pugi::xml_node& w : m_ways) {
+			if (!hasTag(w, tag_key, tag_value)) continue;
+					
+			polygon.clear();
+			getWay(w, terrain, Ref(polygon));
+			createAreaMesh(polygon, terrain, randomColor().abgr(), out, allocator);
+		}
+	}
 
 	bool getLatLon(pugi::xml_node nd_ref, Ref<DVec2> p) const {
 		if (nd_ref.empty() || !equalStrings(nd_ref.name(), "nd")) return false;
@@ -135,6 +326,81 @@ struct OSMParser {
 
 		p = {lat, lon};
 		return true;
+	}
+	
+	template <typename F>
+	void forEachWayInRelation(pugi::xml_node relation, F& f) const {
+		for (pugi::xml_node n = relation.first_child(); !n.empty(); n = n.next_sibling()) {
+			if (!equalStrings(n.name(), "member")) continue;
+			if (!hasAttributeValue(n, "type", "way")) continue;
+
+			u64 ref;
+			if (!getAttributeValue(n, "ref", Ref(ref))) continue;
+		
+			auto iter = m_ways.find(ref);
+			if (!iter.isValid()) continue;
+
+			pugi::xml_attribute role_attr = n.attribute("role");
+			const char* role = role_attr.empty() ? "" : role_attr.value();
+
+			f(iter.value(), role);
+		}
+	}
+
+	void getMultipolygon(pugi::xml_node relation, Multipolygon& multipolygon, EntityRef terrain) {
+		Array<Polygon> polylines(m_app.getAllocator());
+		forEachWayInRelation(relation, [&](const pugi::xml_node& w, const char* role){
+			if (!equalStrings(role, "outer")) return;
+
+			Polygon& polygon = polylines.emplace(m_app.getAllocator());
+			getWay(w, terrain, Ref(polygon));
+		});
+		
+		multipolygon.outer_polygons.clear();
+		while(!polylines.empty()) {
+			mergePolylines(polylines, multipolygon.outer_polygons.emplace(m_app.getAllocator()));
+		}
+
+		polylines.clear();
+		forEachWayInRelation(relation, [&](const pugi::xml_node& w, const char* role){
+			if (!equalStrings(role, "inner")) return;
+
+			Polygon& polygon = polylines.emplace(m_app.getAllocator());
+			getWay(w, terrain, Ref(polygon));
+		});
+		
+		multipolygon.inner_polygons.clear();
+		while(!polylines.empty()) {
+			mergePolylines(polylines, multipolygon.inner_polygons.emplace(m_app.getAllocator()));
+		}
+	}
+
+	void getMultipolygon(pugi::xml_node relation, Multipolygon2D& multipolygon) {
+		Array<Polygon2D> polylines(m_app.getAllocator());
+		forEachWayInRelation(relation, [&](const pugi::xml_node& w, const char* role){
+			if (!equalStrings(role, "outer")) return;
+
+			Polygon2D& polygon = polylines.emplace(m_app.getAllocator());
+			getWay(w, Ref(polygon));
+		});
+		
+		multipolygon.outer_polygons.clear();
+		while(!polylines.empty()) {
+			mergePolylines(polylines, multipolygon.outer_polygons.emplace(m_app.getAllocator()));
+		}
+
+		polylines.clear();
+		forEachWayInRelation(relation, [&](const pugi::xml_node& w, const char* role){
+			if (!equalStrings(role, "inner")) return;
+
+			Polygon2D& polygon = polylines.emplace(m_app.getAllocator());
+			getWay(w, Ref(polygon));
+		});
+		
+		multipolygon.inner_polygons.clear();
+		while(!polylines.empty()) {
+			mergePolylines(polylines, multipolygon.inner_polygons.emplace(m_app.getAllocator()));
+		}
 	}
 
 	bool toPos(pugi::xml_node nd_ref, Ref<DVec3> p) const {
@@ -258,7 +524,7 @@ struct OSMParser {
 		return true;
 	}
 
-	BoundingBox createAreaMesh(Array<DVec3>& polygon, EntityRef terrain, u32 abgr, Ref<Array<UniverseView::Vertex>> out, IAllocator& allocator) const {
+	BoundingBox createAreaMesh(Polygon& polygon, EntityRef terrain, u32 abgr, Ref<Array<UniverseView::Vertex>> out, IAllocator& allocator) const {
 		if (polygon.size() < 3) return {};
 		BoundingBox res;
 		res.center = DVec3(0);
@@ -658,7 +924,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		, m_in_progress(app.getAllocator())
 		, m_queue(app.getAllocator())
 		, m_osm_parser(app)
-		, m_osm_lines(app.getAllocator())
 		, m_osm_tris(app.getAllocator())
 		, m_bitmap(app.getAllocator())
 		, m_tmp_bitmap(app.getAllocator())
@@ -1429,41 +1694,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 	}
 
-	static Color randomColor() {
-		// HSV to RGB with S=1,V=1,H=random
-		const i32 H = rand(0, 360);
-		const u8 X = u8(clamp(255 * (1 - abs(fmodf(H / 60.0f, 2) - 1)), 0.f, 255.f) + 0.5);
-
-		Color res(0);
-		res.a = 0xff;
-
-		if(H >= 0 && H < 60) {
-			res.r = 255;
-			res.g = X;
-		}
-		else if(H >= 60 && H < 120) {	
-			res.r = X;
-			res.g = 255;
-		}
-		else if(H >= 120 && H < 180) {
-			res.g = 255;
-			res.b = X;	
-		}
-		else if(H >= 180 && H < 240) {
-			res.g = X;
-			res.b = 255;	
-		}
-		else if(H >= 240 && H < 300) {
-			res.r = X;
-			res.b = 255;	
-		}
-		else {
-			res.r = 255;
-			res.b = X;	
-		}
-		return res;
-	}
-
 	static void tagInput(Span<char> key, Span<char> value, Span<const char*> values) {
 		ImGuiEx::Label("Tag");
 		const float w = (ImGui::GetContentRegionAvail().x - 20) * 0.5f;
@@ -1527,6 +1757,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		REGISTER(growMask);
 		REGISTER(maskPolygons);
 		REGISTER(maskPolylines);
+		REGISTER(noise);
 		REGISTER(unmaskPolylines);
 		REGISTER(unmaskPolygons);
 		REGISTER(placePrefabs);
@@ -1612,6 +1843,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 	}
 
+	void noise(float probability, u8 value) {
+		for (u8& v : m_bitmap) {
+			if (randFloat(0, 1) < probability) v = value;
+		}
+	}
+
 	void invertMask() {
 		for (u8& v : m_bitmap) {
 			v = ~v;
@@ -1643,6 +1880,22 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		if (def.inverted) {
 			memset(m_tmp_bitmap.begin(), 0, m_tmp_bitmap.byte_size());
 		}
+
+		Multipolygon2D multipolygon(m_app.getAllocator());
+		for (pugi::xml_node& r : m_osm_parser.m_relations) {
+			if (!OSMParser::hasTag(r, def.key, def.value)) continue;
+			
+			m_osm_parser.getMultipolygon(r, multipolygon);
+
+			for (const Polygon2D& p : multipolygon.outer_polygons) {
+				for (const DVec2 p : polygon) {
+					DVec2 tmp = toBitmap(p);
+					points.push(IVec2((i32)tmp.x, (i32)tmp.y));
+				}
+				raster(def.inverted ? 0xff : value, points, m_bitmap_size, Ref(bitmap));
+			}
+		}
+
 		for (pugi::xml_node& w : m_osm_parser.m_ways) {
 			if (!OSMParser::hasTag(w, def.key, def.value)) continue;
 
@@ -1976,7 +2229,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 		splatmap->onDataUpdated(0, 0, splatmap->width, splatmap->height);
 	}
-
+	
 	void paintGrass(u16 grass) {
 		const Terrain* terrain = getSelectedTerrain();
 		if (!terrain) return;
@@ -2012,18 +2265,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		splatmap->onDataUpdated(0, 0, splatmap->width, splatmap->height);
 	}
 
-	void getRelationPolygons(const pugi::xml_node& relation, Array<Array<DVec3>>& polygons, EntityRef terrain) {
-		Array<Array<DVec3>> polylines(m_app.getAllocator());
-		forEachWayInRelation(relation, [&](const pugi::xml_node& w){
-			Array<DVec3>& polygon = polylines.emplace(m_app.getAllocator());
-			m_osm_parser.getWay(w, terrain, Ref(polygon));
-		});
-		polygons.clear();
-		while(!polylines.empty()) {
-			mergePolylines(polylines, polygons.emplace(m_app.getAllocator()));
-		}
-	}
-
 	void OSMGUI() {
 		double bottom = double(tiley2lat(double(m_y - m_offset.y / 256.0), m_zoom));
 		double left = double(tilex2long(double(m_x - m_offset.x / 256.0), m_zoom));
@@ -2047,17 +2288,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			}
 		}
 
-
-		if (!m_osm_lines.empty()) {
-			UniverseView& view = m_app.getWorldEditor().getView();
-			const Vec3 cam_pos = Vec3(view.getViewport().pos);
-			UniverseView::Vertex* v = view.render(true, m_osm_lines.size());
-			for (i32 i = 0; i < m_osm_lines.size(); ++i) {
-				v[i].pos = m_osm_lines[i] - cam_pos;
-				v[i].abgr = 0xff0000ff;
-			}
-		}
-
 		if (!m_osm_tris.empty()) {
 			UniverseView& view = m_app.getWorldEditor().getView();
 			const Vec3 cam_pos = Vec3(view.getViewport().pos);
@@ -2078,20 +2308,23 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		static char tag_key[64] = "";
 		static char tag_value[64] = "";
 		const char* values[] = {
+			"\0landuse",
+			"forest\0landuse",
+			"farmland\0landuse",
+			"farmyard\0landuse",
+			"meadow\0landuse",
+			"residential\0landuse",
+			"industrial\0landuse",
+			"cemetery\0landuse",
+			"reservoir\0landuse",
+			"water\0natural",
+			"\0building"
+			"\0highway",
 			"footway\0highway",
 			"track\0highway",
 			"path\0highway",
 			"tree_row\0natural",
 			"stream\0waterway",
-			"forest\0landuse",
-			"residential\0landuse",
-			"industrial\0landuse",
-			"farmland\0landuse",
-			"farmyard\0landuse",
-			"cemetery\0landuse",
-			"reservoir\0landuse",
-			"water\0natural",
-			"\0building"
 		};
 		ImGui::Separator();
 		tagInput(Span(tag_key), Span(tag_value), Span(values));
@@ -2099,112 +2332,16 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		const EntityPtr terrain = getTerrain();
 		if (terrain.isValid()) {
 			if (ImGui::Button("Show Area")) {
-				const ComponentType model_instance_type = reflection::getComponentType("model_instance");
-				Array<Array<DVec3>> polygons(m_app.getAllocator());
-				for (pugi::xml_node& r : m_osm_parser.m_relations) {
-					if (!OSMParser::hasTag(r, tag_key, tag_value)) continue;
-					getRelationPolygons(r, polygons, (EntityRef)terrain);
-					for (auto& p : polygons) {
-						m_osm_parser.createAreaMesh(p, (EntityRef)terrain, randomColor().abgr(), Ref(m_osm_tris), m_app.getAllocator());
-					}
-				}
-				polygons.clear();
-				polygons.emplace(m_app.getAllocator());
-				for (pugi::xml_node& w : m_osm_parser.m_ways) {
-					if (!OSMParser::hasTag(w, tag_key, tag_value)) continue;
-					polygons.back().clear();
-					m_osm_parser.getWay(w, (EntityRef)terrain, Ref(polygons.back()));
-					m_osm_parser.createAreaMesh(polygons.back(), (EntityRef)terrain, randomColor().abgr(), Ref(m_osm_tris), m_app.getAllocator());
-				}
+				m_osm_parser.showAreas(tag_key, tag_value, (EntityRef)terrain, Ref(m_osm_tris));
 			}
 
 			ImGui::SameLine();
 			if (ImGui::Button("Show polyline")) {
-				Array<Array<DVec3>> polygons(m_app.getAllocator());
-				for (pugi::xml_node& r : m_osm_parser.m_relations) {
-					if (!OSMParser::hasTag(r, tag_key, tag_value)) continue;
-					getRelationPolygons(r, polygons, (EntityRef)terrain);
-					for (auto& p : polygons) {
-						m_osm_parser.createPolyline(p, randomColor().abgr(), Ref(m_osm_tris));
-					}
-				}
-				
-				polygons.clear();
-				polygons.emplace(m_app.getAllocator());
-				for (pugi::xml_node& w : m_osm_parser.m_ways) {
-					if (!OSMParser::hasTag(w, tag_key, tag_value)) continue;
-					polygons.back().clear();
-					m_osm_parser.getWay(w, (EntityRef)terrain, Ref(polygons.back()));
-					m_osm_parser.createPolyline(polygons.back(), randomColor().abgr(), Ref(m_osm_tris));
-				}
+				m_osm_parser.showPolylines(tag_key, tag_value, (EntityRef)terrain, Ref(m_osm_tris));
 			}
 		}
 		ImGui::SameLine();
-		if (ImGui::Button("Reset visualization")) {
-			m_osm_tris.clear();
-			m_osm_lines.clear();
-		}
-	}
-
-	static bool samePoint(const DVec3& a, const DVec3& b) {
-		if (abs(a.x - b.x) > 1e-5) return false;
-		if (abs(a.y - b.y) > 1e-5) return false;
-		if (abs(a.z - b.z) > 1e-5) return false;
-
-		return true;
-	}
-
-	void mergePolylines(Array<Array<DVec3>>& polylines, Array<DVec3>& merged) {
-		merged = polylines.back().move();
-		polylines.pop();
-		while (!polylines.empty()) {
-			const DVec3 end = merged.back();
-			bool found = false;
-			for (Array<DVec3>& i : polylines) {
-				if (samePoint(i[0], end)) {
-					for (int j = 1; j < i.size(); ++j) {
-						merged.push(i[j]);
-					}
-					polylines.erase(u32(&i - polylines.begin()));
-					found = true;
-					break;
-				}
-				else if (samePoint(i.back(), end)) {
-					for (int j = i.size() - 2; j >= 0; --j) {
-						merged.push(i[j]);
-					}
-					polylines.erase(u32(&i - polylines.begin()));
-					found = true;
-					break;
-				}
-			}
-			if (!found) return;
-		}
-	}
-
-	template <typename F>
-	void forEachWayInRelation(const pugi::xml_node& relation, F& f) {
-		for (pugi::xml_node n = relation.first_child(); !n.empty(); n = n.next_sibling()) {
-			if (!equalStrings(n.name(), "member")) continue;
-
-			pugi::xml_attribute type_attr = n.attribute("type");
-			if (type_attr.empty()) continue;
-
-			const char* type_str = type_attr.value();
-			if (!equalStrings(type_str, "way")) continue;
-
-			pugi::xml_attribute ref_attr = n.attribute("ref");
-			if (ref_attr.empty()) continue;
-			
-			const char* ref_str = ref_attr.value();
-			u64 ref;
-			fromCString(Span(ref_str, stringLength(ref_str)), Ref(ref));
-			
-			auto iter = m_osm_parser.m_ways.find(ref);
-			if (!iter.isValid()) continue;
-
-			f(iter.value());
-		}
+		if (ImGui::Button("Reset visualization")) m_osm_tris.clear();
 	}
 
 	void mapGUI() {
@@ -2370,7 +2507,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	IVec2 m_drag_start_offset;
 	bool m_is_dragging = false;
 	OSMParser m_osm_parser;
-	Array<Vec3> m_osm_lines;
 	Array<UniverseView::Vertex> m_osm_tris;
 	Action m_toggle_ui;
 };
