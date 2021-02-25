@@ -1948,6 +1948,13 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		return tmp;
 	}
 
+	Vec2 toBitmap(const Vec2& p) const {
+		Vec2 tmp;
+		tmp.x = p.x  / m_osm_parser.m_scale * (float)m_bitmap_size;
+		tmp.y = (1 - p.y  / m_osm_parser.m_scale) * (float)m_bitmap_size;
+		return tmp;
+	}
+
 	DVec3 toBitmap(const DVec3& p) const {
 		DVec3 tmp;
 		tmp.x = p.x  / m_osm_parser.m_scale * (float)m_bitmap_size;
@@ -2048,43 +2055,56 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		Vec2 a2;
 	};
 
-	void flattenLine(const DVec3& a, const DVec3& b, const Terrain* terrain, float line_width) {
-		if (!terrain) {
-			logError("No terrain");
-			return;
+	void flattenQuad(const Vec2* points, float h0, float h1, const Terrain& terrain) {
+		u16* ptr = (u16*)terrain.m_heightmap->data.getMutableData();
+		const u32 w = terrain.m_heightmap->width;
+		u16* hm_data = (u16*)terrain.m_heightmap->getData();
+
+		const Vec2 min = minimum(points[0], minimum(points[1], minimum(points[2], points[3])));
+		const Vec2 max = maximum(points[0], maximum(points[1], maximum(points[2], points[3])));
+		const float heights[] = { h0, h0, h1, h1 };
+		const u32 h = u32(max.y) + 1 - u32(min.y);
+		for (u32 pixelY = u32(min.y + 0.5f); pixelY < u32(max.y + 0.5f); ++pixelY) {
+			Vec2 nodeXY[256];
+			u32 nodes = 0;
+			for (i32 i = 0; i < 4; i++) {
+				if (points[i].y < (float)pixelY && points[(i + 1) % 4].y >= (float)pixelY ||
+					points[(i + 1) % 4].y < (float)pixelY && points[i].y >= (float)pixelY)
+				{
+					nodeXY[nodes].x = (points[i].x + (pixelY - points[i].y) / (points[(i + 1) % 4].y - points[i].y) * (points[(i + 1) % 4].x - points[i].x));
+					nodeXY[nodes].y = (heights[i] + (pixelY - points[i].y) / (points[(i + 1) % 4].y - points[i].y) * (heights[(i + 1) % 4] - heights[i]));
+					++nodes;
+				}
+			}
+
+			qsort(nodeXY, nodes, sizeof(nodeXY[0]), [](const void* a, const void* b){ 
+				const Vec2 m = *(const Vec2*)a;
+				const Vec2 n = *(const Vec2*)b;
+				return m.y == n.y ? 0 : (m.y < n.y ? -1 : 1); 
+			});
+			if (nodes == 1) continue;
+
+			for (u32 i = 0; i < nodes; i += 2) {
+				nodeXY[i].x = clamp(nodeXY[i].x, 0.f, (float)w);
+				nodeXY[i + 1].x = clamp(nodeXY[i + 1].x, 0.f, (float)w);
+				for (i32 pixelX = i32(nodeXY[i].x + 0.5f); pixelX < i32(nodeXY[i + 1].x + 0.5f); ++pixelX) {
+					u16& v = hm_data[pixelX + pixelY * w];
+					
+					const float t = (pixelX - nodeXY[i].x) / (nodeXY[i + 1].x - nodeXY[i].x);
+					const float h = nodeXY[i].y * (1 - t) + nodeXY[i + 1].y * t;
+					v = u16(h / terrain.m_scale.y * 0xffFF);
+				}
+			}
 		}
-		if (squaredLength(b - a) > 100) {
-			DVec3 mid = (a + b) * 0.5f;
-			mid.y = terrain->getHeight((float)mid.x, (float)mid.z);
-			flattenLine(a, mid, terrain, line_width);
-			flattenLine(b, mid, terrain, line_width);
-			return;
-		}
-
-		ASSERT(terrain->m_heightmap->format == gpu::TextureFormat::R16);
-		u16* ptr = (u16*)terrain->m_heightmap->data.getMutableData();
-		const u32 stride = terrain->m_heightmap->width;
-
-		const Vec2 l0n = Vec3(a).xz() / terrain->getSize();
-		const Vec2 l1n = Vec3(b).xz() / terrain->getSize();
-		const Vec2 min = minimum(l0n, l1n);
-		const Vec2 max = maximum(l0n, l1n);
-
-		const float s = float(terrain->m_width - 1);
-		const Vec2 border(line_width * 0.5f / terrain->m_scale.x);
-		const IVec2 from = IVec2(min * s - border);
-		const IVec2 to = IVec2(max * (s + 1) + border);
-		const Vec2 l0 = l0n * s;
-		const Vec2 l1 = l1n * s;
-
+		/*
 		auto set = [&](i32 i, i32 j){
 			const Vec2 p = Vec2((float)i, (float)j);
 			float t = dot((p - l0), normalize(l1 - l0)) / length(l1 - l0);
 			t = clamp(t, 0.f, 1.f);
-			ptr[i + j * stride] = u16(lerp(a, b, t).y / terrain->m_scale.y * 0xffff);
+			ptr[i + j * stride] = u16(lerp(a, b, t).y / terrain.m_scale.y * 0xffff);
 		};
 
-		Quad2D l(l0, l1, line_width * 0.5f / terrain->m_scale.x);
+		Quad2D l(l0, l1, line_width * 0.5f / terrain.m_scale.x);
 		for (i32 j = from.y; j <= to.y; ++j) {
 			for (i32 i = from.x; i <= to.x; ++i) {
 				Quad2D ij(i, j);
@@ -2096,20 +2116,51 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				set(i + 1, j + 1);
 				set(i, j + 1);
 				set(i + 1, j);
-/*
-				if (l.intersect(t0)) {
-					ptr[i + j * stride] = 0;
-					ptr[i + 1 + j * stride] = 0;
-					ptr[i + j * stride] = 0;
-				}
-
-				if (l.intersect(t1)) {
-					ptr[i + j * stride] = 0;
-					ptr[i + j * stride] = 0;
-					ptr[i + j * stride] = 0;
-				}*/
 			}
+		}*/
+	}
+
+	void flattenLine(const DVec3& prev, const DVec3& a, const DVec3& b, const DVec3& next, const Terrain& terrain, float line_width) {
+		ASSERT(terrain.m_heightmap->format == gpu::TextureFormat::R16);
+		
+		/*if (squaredLength((b - a).xz()) > 100) {
+			DVec3 mid = (a + b) * 0.5f;
+			mid.y = terrain.getHeight((float)mid.x, (float)mid.z);
+			flattenLine(prev, a, mid, b, terrain, line_width);
+			flattenLine(a, mid, b, next, terrain, line_width);
+			return;
+		}*/
+
+		const Vec2 a2d = Vec3(a).xz();
+		const Vec2 b2d = Vec3(b).xz();
+		const Vec2 prev2d = Vec3(prev).xz();
+		const Vec2 next2d = Vec3(next).xz();
+		const Vec2 dir = b2d - a2d;
+		Vec2 n0 = a2d - prev2d;
+		if (squaredLength(n0) < 1e-3) {
+			n0 = dir;
 		}
+		n0 = normalize(Vec2(n0.y, -n0.x));
+
+		Vec2 n1 = next2d - b2d;
+		if (squaredLength(n1) < 1e-3) {
+			n1 = dir;
+		}
+		n1 = normalize(Vec2(n1.y, -n1.x));
+
+		Vec2 points[] = { a2d - n0 * line_width * 0.5f
+			, a2d + n0 * line_width * 0.5f
+			, b2d + n1 * line_width * 0.5f
+			, b2d - n1 * line_width * 0.5f
+		};
+
+		for (int i = 0; i < 4; ++i) {
+			points[i].x = points[i].x / m_osm_parser.m_scale * terrain.m_heightmap->width;
+			points[i].y = points[i].y / m_osm_parser.m_scale * terrain.m_heightmap->height;
+		}
+
+		flattenQuad(points, (float)a.y, (float)b.y, terrain);
+
 	}
 
 	void flattenPolylines(lua_State* L) {
@@ -2121,6 +2172,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		if (!terrain->m_heightmap) luaL_error(L, "heightmap missing");
 		if (!terrain->m_heightmap->isReady()) luaL_error(L, "heightmap is not ready");
 
+		float line_width = 10.f;
+		LuaWrapper::getOptionalField(L, 1, "line_width", &line_width);
+
 		for (pugi::xml_node& w : m_osm_parser.m_ways) {
 			if (!OSMParser::hasTag(w, def.key, def.value)) continue;
 
@@ -2128,7 +2182,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			m_osm_parser.getWay(w, (EntityRef)terrain_entity, Ref(polyline));
 
 			for (i32 i = 0; i < polyline.size() - 1; ++i) {
-				flattenLine(polyline[i], polyline[i + 1], terrain, 5.f);
+				flattenLine(polyline[i > 0 ? i - 1 : 0],
+					polyline[i],
+					polyline[i + 1],
+					polyline[i + 2 < polyline.size() ? i + 2 : i + 1],
+					*terrain,
+					line_width);
 			}
 		}
 		terrain->m_heightmap->onDataUpdated(0, 0, terrain->m_heightmap->width, terrain->m_heightmap->height);
