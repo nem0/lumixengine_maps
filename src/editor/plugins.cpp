@@ -58,11 +58,6 @@ struct BoundingBox {
 	float yaw;
 };
 
-struct DVec2 {
-	double x, y;
-	DVec2 operator -(const DVec2& rhs) const { return {x - rhs.x, y - rhs.y}; }
-};
-
 struct TileLoc {
 	TileLoc() {}
 	TileLoc(int _x, int _y, int z) 
@@ -80,6 +75,7 @@ struct TileLoc {
 
 static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
 static const ComponentType TERRAIN_TYPE = reflection::getComponentType("terrain");
+static const ComponentType DECAL_TYPE = reflection::getComponentType("decal");
 
 double long2tilex(double long lon, int z) {
 	return (lon + 180) * (1 << z) / 360.0;
@@ -1762,6 +1758,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		REGISTER(noise);
 		REGISTER(unmaskPolylines);
 		REGISTER(unmaskPolygons);
+		REGISTER(placeDecals);
 		REGISTER(placePrefabs);
 		REGISTER(paintGrass);
 		REGISTER(paintGround);
@@ -2163,6 +2160,38 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		flattenQuad(points, (float)a.y, (float)b.y, terrain, line_width * s, boundary_width * s);
+	}
+	
+	void placeDecals(lua_State* L) {
+		const WayDef def(L);
+
+		Array<DVec3> polyline(m_app.getAllocator());
+		const EntityPtr terrain_entity = getTerrain();
+		if (!terrain_entity.isValid()) luaL_error(L, "no terrain is selected");
+		const Terrain* terrain = getSelectedTerrain();
+		if (!terrain->m_heightmap) luaL_error(L, "heightmap missing");
+		if (!terrain->m_heightmap->isReady()) luaL_error(L, "heightmap is not ready");
+
+		WorldEditor& editor = m_app.getWorldEditor();
+		for (pugi::xml_node& w : m_osm_parser.m_ways) {
+			if (!OSMParser::hasTag(w, def.key, def.value)) continue;
+
+			polyline.clear();
+			m_osm_parser.getWay(w, (EntityRef)terrain_entity, Ref(polyline));
+			for (i32 i = 0; i < polyline.size() - 1; ++i) {
+				const float half_extent = (float)length(polyline[i] - polyline[i + 1]) * 0.5f;
+				Vec3 dir = normalize(Vec3(polyline[i] - polyline[i + 1]));
+				dir.y = 0;
+				dir = normalize(dir);
+				const DVec3 p = (polyline[i] + polyline[i + 1]) * 0.5;
+				const EntityRef e = editor.addEntityAt(p);
+				const Quat rot = Quat::vec3ToVec3(dir, Vec3(1, 0, 0)).conjugated();
+				editor.setEntitiesRotations(&e, &rot, 1);
+				editor.addComponent(Span(&e, 1), DECAL_TYPE);
+				editor.setProperty(DECAL_TYPE, "", 0, "Material", Span(&e, 1), Path("models/decals/road.mat"));
+				editor.setProperty(DECAL_TYPE, "", 0, "Half extents", Span(&e, 1), Vec3(half_extent, 20, 3));
+			}
+		}
 	}
 
 	void flattenPolylines(lua_State* L) {
