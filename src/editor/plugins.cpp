@@ -75,7 +75,7 @@ struct TileLoc {
 
 static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
 static const ComponentType TERRAIN_TYPE = reflection::getComponentType("terrain");
-static const ComponentType DECAL_TYPE = reflection::getComponentType("decal");
+static const ComponentType CURVE_DECAL_TYPE = reflection::getComponentType("curve_decal");
 
 double long2tilex(double long lon, int z) {
 	return (lon + 180) * (1 << z) / 360.0;
@@ -2178,18 +2178,32 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 			polyline.clear();
 			m_osm_parser.getWay(w, (EntityRef)terrain_entity, Ref(polyline));
-			for (i32 i = 0; i < polyline.size() - 1; ++i) {
-				const float half_extent = (float)length(polyline[i] - polyline[i + 1]) * 0.5f;
+			// TODO polyline.size() <= 2
+			for (i32 i = 1; i < polyline.size() - 1; ++i) {
 				Vec3 dir = normalize(Vec3(polyline[i] - polyline[i + 1]));
 				dir.y = 0;
 				dir = normalize(dir);
-				const DVec3 p = (polyline[i] + polyline[i + 1]) * 0.5;
-				const EntityRef e = editor.addEntityAt(p);
+				const EntityRef e = editor.addEntityAt(polyline[i]);
+				DVec3 p0 = i == 1 ? polyline[i - 1] : (polyline[i - 1] + polyline[i]) * 0.5;
+				DVec3 p2 = i == polyline.size() - 2 ? polyline[i + 1] : (polyline[i + 1] + polyline[i]) * 0.5;
 				const Quat rot = Quat::vec3ToVec3(dir, Vec3(1, 0, 0)).conjugated();
 				editor.setEntitiesRotations(&e, &rot, 1);
-				editor.addComponent(Span(&e, 1), DECAL_TYPE);
-				editor.setProperty(DECAL_TYPE, "", 0, "Material", Span(&e, 1), Path("models/decals/road.mat"));
-				editor.setProperty(DECAL_TYPE, "", 0, "Half extents", Span(&e, 1), Vec3(half_extent, 20, 3));
+				editor.addComponent(Span(&e, 1), CURVE_DECAL_TYPE);
+				editor.setProperty(CURVE_DECAL_TYPE, "", 0, "Material", Span(&e, 1), Path("models/decals/road.mat"));
+				const float height = (float)maximum(abs(polyline[i].y - polyline[i - 1].y), abs(polyline[i].y - polyline[i + 1].y));
+				editor.setProperty(CURVE_DECAL_TYPE, "", 0, "Half extents", Span(&e, 1), height + 2);
+				const float scale = float(length(p0 - polyline[i]) + length(p2 - polyline[i])) * 0.2f;
+				editor.setProperty(CURVE_DECAL_TYPE, "", 0, "UV scale", Span(&e, 1), Vec2(8, scale));
+
+				Transform tr;
+				tr.pos = polyline[i];
+				tr.rot = rot;
+				tr.scale = 1;
+				p0 = tr.inverted().transform(p0);
+				p2 = tr.inverted().transform(p2);
+
+				editor.setProperty(CURVE_DECAL_TYPE, "", 0, "Bezier P0", Span(&e, 1), Vec2(p0.xz()) * 1.01f);
+				editor.setProperty(CURVE_DECAL_TYPE, "", 0, "Bezier P2", Span(&e, 1), Vec2(p2.xz()) * 1.01f);
 			}
 		}
 	}
