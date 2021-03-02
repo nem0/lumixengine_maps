@@ -1146,8 +1146,10 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	}
 
 	void createMapEntity() {
+		const double lat = double(tiley2lat(double(m_y + (1 << (m_size - 1))), m_zoom));
+		const double width = 256 * (1 << m_size) * 156543.03 * cos(degreesToRadians(lat)) / (1 << m_zoom);
 		WorldEditor& editor = m_app.getWorldEditor();
-		const EntityRef e = editor.addEntityAt({0, 0, 0});
+		const EntityRef e = editor.addEntityAt({-width * 0.5, m_last_saved_hm_range.x, -width * 0.5});
 		editor.addComponent(Span(&e, 1), TERRAIN_TYPE);
 		const PathInfo file_info(m_out_path);
 		StaticString<LUMIX_MAX_PATH> mat_path(file_info.m_dir, "/", file_info.m_basename, ".mat");
@@ -1158,10 +1160,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 		editor.setProperty(TERRAIN_TYPE, "", -1, "Material", Span(&e, 1), Path(rel_mat_path));
 
-		const double lat = double(tiley2lat(double(m_y + (1 << (m_size - 1))), m_zoom));
-		const double width = 256 * (1 << m_size) * 156543.03 * cos(degreesToRadians(lat)) / (1 << m_zoom);
 		const float scale = float(width / ((1 << m_size) * 256));
 		editor.setProperty(TERRAIN_TYPE, "", -1, "XZ scale", Span(&e, 1), scale / m_scale_hm);
+		editor.setProperty(TERRAIN_TYPE, "", -1, "Height scale", Span(&e, 1), m_last_saved_hm_range.y - m_last_saved_hm_range.x);
 	}
 
 	void rescale(Array<u16>& raw, i32 map_size, i32 scale) {
@@ -1189,6 +1190,10 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 		raw.resize(tmp.size());
 		memcpy(raw.begin(), tmp.begin(), tmp.byte_size());
+	}
+
+	static float toFloatHeight(u32 height) {
+		return (height >> 16) * 256.f + ((height >> 8) & 0xff) * 1.f + (height & 0xff) / 256.f - 32768.f;
 	}
 
 	void save()
@@ -1235,6 +1240,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			if (max < p) max = p;
 			if (min > p) min = p;
 		});
+
+		m_last_saved_hm_range.x = toFloatHeight(min);
+		m_last_saved_hm_range.y = toFloatHeight(max);
 
 		double diff = max - min;
 		for_each([&](i32 x, i32 y, const RGBA rgba){
@@ -2733,6 +2741,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	OSMParser m_osm_parser;
 	Array<UniverseView::Vertex> m_osm_tris;
 	Action m_toggle_ui;
+	Vec2 m_last_saved_hm_range = Vec2(0, 1000);
 };
 
 
