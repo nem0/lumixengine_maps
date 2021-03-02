@@ -1140,7 +1140,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	}
 
-
 	bool browse()
 	{
 		return os::getSaveFilename(Span(m_out_path), "Raw Image\0*.raw\0", "raw");
@@ -1163,12 +1162,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		const double width = 256 * (1 << m_size) * 156543.03 * cos(degreesToRadians(lat)) / (1 << m_zoom);
 		const float scale = float(width / ((1 << m_size) * 256));
 		editor.setProperty(TERRAIN_TYPE, "", -1, "XZ scale", Span(&e, 1), scale / m_scale_hm);
-	}
-
-	bool createHeightmap(const char* material_path, int size)
-	{
-		
-		return true;
 	}
 
 	void rescale(Array<u16>& raw, i32 map_size, i32 scale) {
@@ -2284,15 +2277,16 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		const int type = LuaWrapper::getField(L, 1, "prefabs");
 		if (type == LUA_TNIL) luaL_error(L, "missing `prefabs`");
 		if (type != LUA_TTABLE) luaL_error(L, "`prefabs` is not a table");
+		WorldEditor& editor = m_app.getWorldEditor();
 		Array<PrefabResource*> prefabs(m_app.getAllocator());
-		ResourceManagerHub& rm = m_app.getWorldEditor().getEngine().getResourceManager();
+		ResourceManagerHub& rm = editor.getEngine().getResourceManager();
 		LuaWrapper::forEachArrayItem<const char*>(L, -1, "array of strings expected", [&](const char* path){
 			prefabs.push(rm.load<PrefabResource>(Path(path)));
 		});
 		lua_pop(L, 1);
 		if (prefabs.empty()) return;
 
-		Universe* universe = m_app.getWorldEditor().getUniverse();
+		Universe* universe = editor.getUniverse();
 		RenderScene* render_scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
 		Array<Array<Transform>> transforms(m_app.getAllocator());
 		const i32 prefabs_count = prefabs.size();
@@ -2313,13 +2307,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			}
 		}
 
-		FileSystem& fs = m_app.getWorldEditor().getEngine().getFileSystem();
+		FileSystem& fs = editor.getEngine().getFileSystem();
 		while (fs.hasWork()) {
 			os::sleep(10);
 			fs.processCallbacks();
 		}
 
-		WorldEditor& editor = m_app.getWorldEditor();
 		editor.beginCommandGroup("maps_place_prefabs");
 		for (u32 i = 0; i < (u32)prefabs.size(); ++i) {
 			if (!transforms[i].empty()) editor.getPrefabSystem().instantiatePrefabs(*prefabs[i], transforms[i]);
