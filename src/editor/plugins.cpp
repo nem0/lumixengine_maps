@@ -472,9 +472,11 @@ struct OSMParser {
 				DVec2 lat_lon;
 				getLatLon(c, Ref(lat_lon));
 				DVec3 p;
-				p.x = (lat_lon.y - m_min_lon) / m_lon_range * m_scale - m_scale * 0.5f;
-				p.z = (m_min_lat + m_lat_range - lat_lon.x) / m_lat_range * m_scale - m_scale * 0.5f;
+				p.x = (lat_lon.y - m_min_lon) / m_lon_range * m_scale;
+				p.z = (m_min_lat + m_lat_range - lat_lon.x) / m_lat_range * m_scale;
 				p.y = scene->getTerrainHeightAt(terrain, (float)p.x, (float)p.z) + y_base;
+				p.x -= m_scale * 0.5f;
+				p.z -= m_scale * 0.5f;
 				out->push(p);
 			}
 		}		
@@ -582,35 +584,14 @@ struct OSMParser {
 		return res;
 	}
 
-	void clip(Ref<Vec3> a, Ref<Vec3> b, float max) const {
-		const Vec3 v = b.value - a.value;
-		if (a->x < 0) {
-			a->z -= a->x * v.z / v.x;
-			a->x = 0;
-		}
-		if (a->z < 0) {
-			a->x -= a->z * v.x / v.z;
-			a->z = 0;
-		}
-		if (a->x > max) {
-			a->z -= (a->x - max) * v.z / v.x;
-			a->x = max;
-		}
-		if (a->z > max) {
-			a->x -= (a->z - max) * v.x / v.z;
-			a->z = max;
-		}
-	}
-
 
 	void createPolyline(const Array<DVec3>& points, u32 color, Ref<Array<UniverseView::Vertex>> out) {
 		if (points.empty()) return;
 
+		const float half_extents = m_scale * 0.5f;
 		for(i32 i = 0; i < points.size() - 1; ++i) {	
 			Vec3 a = Vec3(points[i]) + Vec3(0, 1, 0);
 			Vec3 b = Vec3(points[i + 1]) + Vec3(0, 1, 0);
-			clip(Ref(a), Ref(b), m_scale);
-			clip(Ref(b), Ref(a), m_scale);
 
 			if (squaredLength(a-b) < 0.01f) continue;
 
