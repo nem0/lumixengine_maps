@@ -2192,6 +2192,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		if (!terrain->m_heightmap->isReady()) luaL_error(L, "heightmap is not ready");
 
 		WorldEditor& editor = m_app.getWorldEditor();
+		editor.beginCommandGroup("place_decals");
 		for (pugi::xml_node& w : m_osm_parser.m_ways) {
 			if (!OSMParser::hasTag(w, def.key, def.value)) continue;
 
@@ -2210,7 +2211,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				editor.addComponent(Span(&e, 1), CURVE_DECAL_TYPE);
 				editor.setProperty(CURVE_DECAL_TYPE, "", 0, "Material", Span(&e, 1), Path("models/decals/road.mat"));
 				const float height = (float)maximum(abs(polyline[i].y - polyline[i - 1].y), abs(polyline[i].y - polyline[i + 1].y));
-				editor.setProperty(CURVE_DECAL_TYPE, "", 0, "Half extents", Span(&e, 1), height + 2);
+				editor.setProperty(CURVE_DECAL_TYPE, "", 0, "Half extents", Span(&e, 1), height + 4);
 				const float scale = float(length(p0 - polyline[i]) + length(p2 - polyline[i])) * 0.2f;
 				editor.setProperty(CURVE_DECAL_TYPE, "", 0, "UV scale", Span(&e, 1), Vec2(8, scale));
 
@@ -2225,6 +2226,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				editor.setProperty(CURVE_DECAL_TYPE, "", 0, "Bezier P2", Span(&e, 1), Vec2(p2.xz()) * 1.01f);
 			}
 		}
+		editor.endCommandGroup();
 	}
 
 	void flattenPolylines(lua_State* L) {
