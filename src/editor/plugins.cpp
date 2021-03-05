@@ -465,15 +465,16 @@ struct OSMParser {
 		WorldEditor& editor = m_app.getWorldEditor();
 		Universe* universe = editor.getUniverse();
 		RenderScene* scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
+		const double y_base = universe->getPosition(terrain).y;
 		
 		for (pugi::xml_node& c : way.children()) {
 			if (equalStrings(c.name(), "nd")) {
 				DVec2 lat_lon;
 				getLatLon(c, Ref(lat_lon));
 				DVec3 p;
-				p.x = (lat_lon.y - m_min_lon) / m_lon_range * m_scale;
-				p.z = (m_min_lat + m_lat_range - lat_lon.x) / m_lat_range * m_scale;
-				p.y = scene->getTerrainHeightAt(terrain, (float)p.x, (float)p.z);
+				p.x = (lat_lon.y - m_min_lon) / m_lon_range * m_scale - m_scale * 0.5f;
+				p.z = (m_min_lat + m_lat_range - lat_lon.x) / m_lat_range * m_scale - m_scale * 0.5f;
+				p.y = scene->getTerrainHeightAt(terrain, (float)p.x, (float)p.z) + y_base;
 				out->push(p);
 			}
 		}		
@@ -485,8 +486,8 @@ struct OSMParser {
 				DVec2 lat_lon;
 				getLatLon(c, Ref(lat_lon));
 				DVec2 p;
-				p.x = (lat_lon.y - m_min_lon) / m_lon_range * m_scale;
-				p.y = (m_min_lat + m_lat_range - lat_lon.x) / m_lat_range * m_scale;
+				p.x = (lat_lon.y - m_min_lon) / m_lon_range * m_scale - m_scale * 0.5f;
+				p.y = (m_min_lat + m_lat_range - lat_lon.x) / m_lat_range * m_scale - m_scale * 0.5f;
 				out->push(p);
 			}
 		}		
@@ -945,8 +946,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		m_app.getSettings().setValue("maps_x", m_x);
 		m_app.getSettings().setValue("maps_y", m_y);
 		m_app.getSettings().setValue("maps_zoom", m_zoom);
-		m_app.getSettings().setValue("maps_offset_x", m_offset.x);
-		m_app.getSettings().setValue("maps_offset_y", m_offset.y);
+		m_app.getSettings().setValue("maps_offset_x", m_pixel_offset.x);
+		m_app.getSettings().setValue("maps_offset_y", m_pixel_offset.y);
 		m_app.getSettings().setValue("maps_size", m_size);
 	}
 
@@ -955,8 +956,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		m_x = m_app.getSettings().getValue("maps_x", 0);
 		m_y = m_app.getSettings().getValue("maps_y", 0);
 		m_zoom = m_app.getSettings().getValue("maps_zoom", 1);
-		m_offset.x = m_app.getSettings().getValue("maps_offset_x", 0);
-		m_offset.y = m_app.getSettings().getValue("maps_offset_y", 0);
+		m_pixel_offset.x = m_app.getSettings().getValue("maps_offset_x", 0);
+		m_pixel_offset.y = m_app.getSettings().getValue("maps_offset_y", 0);
 		m_size = m_app.getSettings().getValue("maps_size", 1);
 		const u32 len = m_app.getSettings().getValue("maps_script", Span(m_script));
 		if (len == 0) m_script[0] = '\0';
@@ -1006,13 +1007,46 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	bool isOpen() const { return m_open; }
 	const char* getName() const override { return "maps"; }
 
+
 	DVec2 getCenter() {
 		int size = 1 << m_zoom;
 		DVec2 res;
-		res.x = ((m_x + size) % size + (1 << (m_size - 1))) / double(size);
-		res.y = ((m_y + size) % size + (1 << (m_size - 1))) / double(size);
-		res.x -= m_offset.x * pixelToWorld();
-		res.y -= m_offset.y * pixelToWorld();
+
+		const double half = m_size == 0 ? 0.5 / double(size) : (1 << (m_size - 1)) / double(size);
+
+		res.x = ((m_x + size) % size) / double(size);
+		res.y = ((m_y + size) % size) / double(size);
+		res.x += half;
+		res.y += half;
+		res.x -= m_pixel_offset.x * pixelToWorld();
+		res.y -= m_pixel_offset.y * pixelToWorld();
+		return res;
+	}
+
+	void setCorner(const DVec2& p) {
+		const double worldToPixel = 1.0 / pixelToWorld();
+		
+		const i32 size = 1 << m_zoom;
+		m_x = i32(p.x * size);
+		m_y = i32(p.y * size);
+
+		const double dx = m_x / double(size) - p.x;
+		const double dy = m_y / double(size) - p.y;
+
+		m_pixel_offset.x = i32(worldToPixel * dx);
+		m_pixel_offset.y = i32(worldToPixel * dy);
+		
+		download();
+	}
+
+	DVec2 getCorner() {
+		int size = 1 << m_zoom;
+		DVec2 res;
+
+		res.x = ((m_x + size) % size) / double(size);
+		res.y = ((m_y + size) % size) / double(size);
+		res.x -= m_pixel_offset.x * pixelToWorld();
+		res.y -= m_pixel_offset.y * pixelToWorld();
 		return res;
 	}
 
@@ -1109,10 +1143,10 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		if (loc.x - x < -size) x -= size;
 		if (loc.y - y < -size) y -= size;
 
-		const int right_edge = m_offset.x < 0;
-		const int left_edge = m_offset.x > 0;
-		const int bottom_edge = m_offset.y < 0;
-		const int top_edge = m_offset.y > 0;
+		const int right_edge = m_pixel_offset.x < 0;
+		const int left_edge = m_pixel_offset.x > 0;
+		const int bottom_edge = m_pixel_offset.y < 0;
+		const int top_edge = m_pixel_offset.y > 0;
 		if (loc.x < m_x - left_edge) return false;
 		if (loc.y < m_y - top_edge) return false;
 		if (loc.x > m_x + ((1 << m_size) - 1) + right_edge) return false;
@@ -1427,9 +1461,10 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	}
 
 
-	void resize()
+	void resize(const DVec2& corner, i32 old_size)
 	{
-		download();
+		m_zoom += m_size - old_size;
+		setCorner(corner);
 	}
 
 
@@ -1456,11 +1491,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		const int size = 1 << m_zoom;
 		m_x = int(center.x * size) - 1;
 		m_y = int(center.y * size) - 1;
-		IVec2 offset = m_offset;
-		m_offset = IVec2(0);
+		IVec2 offset = m_pixel_offset;
+		m_pixel_offset = IVec2(0);
 		const DVec2 new_center = getCenter();
-		m_offset.x += int((new_center.x - center.x) / pixelToWorld());
-		m_offset.y += int((new_center.y - center.y) / pixelToWorld());
+		m_pixel_offset.x += int((new_center.x - center.x) / pixelToWorld());
+		m_pixel_offset.y += int((new_center.y - center.y) / pixelToWorld());
 		const DVec2 check = getCenter();
 
 		download();
@@ -1468,8 +1503,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	ImVec2 getPos(const TileData& tile) const {
 		ImVec2 res;
-		res.x = float(256 * (tile.loc.x - m_x)) + m_offset.x;
-		res.y = float(256 * (tile.loc.y - m_y)) + m_offset.y;
+		res.x = float(256 * (tile.loc.x - m_x)) + m_pixel_offset.x;
+		res.y = float(256 * (tile.loc.y - m_y)) + m_pixel_offset.y;
 		return res;
 	}
 
@@ -2500,10 +2535,10 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	}
 
 	void OSMGUI() {
-		double bottom = double(tiley2lat(double(m_y - m_offset.y / 256.0), m_zoom));
-		double left = double(tilex2long(double(m_x - m_offset.x / 256.0), m_zoom));
-		double top = double(tiley2lat(double(m_y - m_offset.y / 256.0 + (1 << m_size)), m_zoom));
-		double right = double(tilex2long(double(m_x - m_offset.x / 256.0 + (1 << m_size)), m_zoom));
+		double bottom = double(tiley2lat(double(m_y - m_pixel_offset.y / 256.0), m_zoom));
+		double left = double(tilex2long(double(m_x - m_pixel_offset.x / 256.0), m_zoom));
+		double top = double(tiley2lat(double(m_y - m_pixel_offset.y / 256.0 + (1 << m_size)), m_zoom));
+		double right = double(tilex2long(double(m_x - m_pixel_offset.x / 256.0 + (1 << m_size)), m_zoom));
 		if (bottom > top) swap(bottom, top);
 		if (left > right) swap(left, right);
 
@@ -2583,7 +2618,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		if (m_is_download_deferred) download();
 
 		ImGuiEx::Label("Size");
-		if (ImGui::Combo("##size", &m_size, "256\0" "512\0" "1024\0" "2048\0" "4096\0")) resize();
+		const DVec2 corner = getCorner();
+		const i32 old_size = m_size;
+		if (ImGui::Combo("##size", &m_size, "256\0" "512\0" "1024\0" "2048\0" "4096\0")) resize(corner, old_size);
 
 		int current_zoom = m_zoom;
 		ImGuiEx::Label("Zoom");
@@ -2632,28 +2669,28 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		ImGui::EndChild();
 
 		if(ImGui::IsMouseDragging(0) && m_is_dragging) {
-			m_offset.x = m_drag_start_offset.x + int(ImGui::GetMouseDragDelta().x) * (1 << (m_size - 1));
-			m_offset.y = m_drag_start_offset.y + int(ImGui::GetMouseDragDelta().y) * (1 << (m_size - 1));
+			m_pixel_offset.x = m_drag_start_offset.x + int(ImGui::GetMouseDragDelta().x) * (1 << (m_size - 1));
+			m_pixel_offset.y = m_drag_start_offset.y + int(ImGui::GetMouseDragDelta().y) * (1 << (m_size - 1));
 			
 			const int size = 1 << m_zoom;
-			if (m_offset.x > 256) {
+			if (m_pixel_offset.x > 256) {
 				m_drag_start_offset.x -= 256;
-				m_offset.x -= 256;
+				m_pixel_offset.x -= 256;
 				--m_x;
 			} 
-			if (m_offset.x < -256) {
+			if (m_pixel_offset.x < -256) {
 				m_drag_start_offset.x += 256;
-				m_offset.x += 256;
+				m_pixel_offset.x += 256;
 				++m_x;
 			} 
-			if (m_offset.y > 256) {
+			if (m_pixel_offset.y > 256) {
 				m_drag_start_offset.y -= 256;
-				m_offset.y -= 256;
+				m_pixel_offset.y -= 256;
 				--m_y;
 			} 
-			if (m_offset.y < -256) {
+			if (m_pixel_offset.y < -256) {
 				m_drag_start_offset.y += 256;
-				m_offset.y += 256;
+				m_pixel_offset.y += 256;
 				++m_y;
 			} 
 			download();
@@ -2665,7 +2702,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		if (ImGui::IsMouseClicked(0) && hovered) {
 			m_is_dragging = true;
-			m_drag_start_offset = m_offset;
+			m_drag_start_offset = m_pixel_offset;
 		}
 
 		if (ImGui::IsMouseReleased(0) && m_is_dragging) {
@@ -2688,7 +2725,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		ImGuiEx::Label("Location");
 		static char loc[256] = "9005;5653;14;38;-158";
 		if (ImGuiEx::IconButton(ICON_FA_MAP_MARKER_ALT, "Get current location")) {
-			StaticString<sizeof(loc)> tmp(m_x, ";", m_y, ";", m_zoom, ";", m_offset.x, ";", m_offset.y);
+			StaticString<sizeof(loc)> tmp(m_x, ";", m_y, ";", m_zoom, ";", m_pixel_offset.x, ";", m_pixel_offset.y);
 			copyString(loc, tmp);
 		}
 		ImGui::SameLine();
@@ -2697,7 +2734,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 		ImGui::SameLine();
 		if (ImGuiEx::IconButton(ICON_FA_BULLSEYE, "View")) {
-			sscanf(loc, "%d;%d;%d;%d;%d", &m_x, &m_y, &m_zoom, &m_offset.x, &m_offset.y);
+			sscanf(loc, "%d;%d;%d;%d;%d", &m_x, &m_y, &m_zoom, &m_pixel_offset.x, &m_pixel_offset.y);
 			download();
 		}
 		ImGui::SameLine();
@@ -2734,7 +2771,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	int m_scale_hm = 1;
 	int m_x = 0;
 	int m_y = 0;
-	IVec2 m_offset{0, 0};
+	IVec2 m_pixel_offset{0, 0};
 	// TODO handle values other than 1
 	int m_size = 1;
 	char m_out_path[LUMIX_MAX_PATH];
