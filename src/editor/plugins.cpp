@@ -258,12 +258,18 @@ struct OSMParser {
 	void showPolylines(const char* tag_key, const char* tag_value, EntityRef terrain, Ref<Array<UniverseView::Vertex>> out) {
 		IAllocator& allocator = m_app.getAllocator();
 		Multipolygon multipolygon(allocator);
+		const u32 green = Color(0, 0xff, 0, 0xff).abgr();
+		const u32 red = Color(0xff, 0, 0, 0xff).abgr();
 		for (pugi::xml_node& r : m_relations) {
 			if (!hasTag(r, tag_key, tag_value)) continue;
 
 			getMultipolygon(r, multipolygon, (EntityRef)terrain);
 			for (const Polygon& p : multipolygon.outer_polygons) {
-				createPolyline(p, randomColor().abgr(), out);
+				createPolyline(p, green, out);
+			}
+
+			for (const Polygon& p : multipolygon.inner_polygons) {
+				createPolyline(p, red, out);
 			}
 		}
 				
@@ -273,7 +279,7 @@ struct OSMParser {
 
 			polygon.clear();
 			getWay(w, (EntityRef)terrain, Ref(polygon));
-			createPolyline(polygon, randomColor().abgr(), out);
+			createPolyline(polygon, green, out);
 		}	
 	}
 
