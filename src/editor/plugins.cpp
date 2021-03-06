@@ -384,7 +384,11 @@ struct OSMParser {
 		
 		multipolygon.outer_polygons.clear();
 		while(!polylines.empty()) {
-			mergePolylines(polylines, multipolygon.outer_polygons.emplace(m_app.getAllocator()));
+			Polygon2D& merged = multipolygon.outer_polygons.emplace(m_app.getAllocator());
+			mergePolylines(polylines, merged);
+			if (!samePoint(merged[0], merged.back())) {
+				merged.push(merged[0]);
+			}
 		}
 
 		polylines.clear();
@@ -1680,19 +1684,29 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		// naive polygon rasterization
 		if (points.empty()) return;
 
-		const u32 h = w;
-		for (u32 pixelY = 0; pixelY < h; ++pixelY) {
+		const i32 h = (i32)w;
+		for (i32 pixelY = 0; pixelY < h; ++pixelY) {
 			i32 nodeX[256];
 			u32 nodes = 0;
 			for (i32 i = 0; i < points.size() - 1; i++) {
-				if (points[i].y < (double)pixelY && points[i + 1].y >= (double)pixelY ||
-					points[i + 1].y < (double)pixelY && points[i].y >= (double)pixelY)
+				if(i32(points[i + 1].y) == i32(points[i].y) && i32(points[i].y) == pixelY) {
+					ASSERT(nodes + 1 < lengthOf(nodeX));
+					nodeX[nodes] = points[i].x;
+					++nodes;
+					nodeX[nodes] = points[i + 1].x;
+					++nodes;
+				
+				}
+				else if (points[i + 1].y >= pixelY && points[i].y < pixelY ||
+					points[i + 1].y < pixelY && points[i].y >= pixelY)
 				{
+					ASSERT(nodes < lengthOf(nodeX));
 					nodeX[nodes] = (i32)(points[i].x + (pixelY - (float)points[i].y) / (points[i + 1].y - (float)points[i].y) * (points[i + 1].x - (float)points[i].x));
 					++nodes;
 				}
 			}
 
+			ASSERT((nodes & 1) == 0);
 			qsort(nodeX, nodes, sizeof(nodeX[0]), [](const void* a, const void* b){ 
 				int m = *(int*)a;
 				int n = *(int*)b;
@@ -1959,23 +1973,23 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	DVec2 toBitmap(const DVec2& p) const {
 		DVec2 tmp;
-		tmp.x = p.x  / m_osm_parser.m_scale * (float)m_bitmap_size;
-		tmp.y = (1 - p.y  / m_osm_parser.m_scale) * (float)m_bitmap_size;
+		tmp = p;
+		tmp.x += m_osm_parser.m_scale * 0.5f; 
+		tmp.y += m_osm_parser.m_scale * 0.5f; 
+
+		tmp.x = tmp.x  / m_osm_parser.m_scale * (float)m_bitmap_size;
+		tmp.y = (1 - tmp.y  / m_osm_parser.m_scale) * (float)m_bitmap_size;
 		return tmp;
 	}
 
 	Vec2 toBitmap(const Vec2& p) const {
 		Vec2 tmp;
-		tmp.x = p.x  / m_osm_parser.m_scale * (float)m_bitmap_size;
-		tmp.y = (1 - p.y  / m_osm_parser.m_scale) * (float)m_bitmap_size;
-		return tmp;
-	}
+		tmp = p;
+		tmp.x += m_osm_parser.m_scale * 0.5f; 
+		tmp.y += m_osm_parser.m_scale * 0.5f; 
 
-	DVec3 toBitmap(const DVec3& p) const {
-		DVec3 tmp;
-		tmp.x = p.x  / m_osm_parser.m_scale * (float)m_bitmap_size;
-		tmp.y = p.y;
-		tmp.z = (1 - p.z  / m_osm_parser.m_scale) * (float)m_bitmap_size;
+		tmp.x = tmp.x  / m_osm_parser.m_scale * (float)m_bitmap_size;
+		tmp.y = (1 - tmp.y  / m_osm_parser.m_scale) * (float)m_bitmap_size;
 		return tmp;
 	}
 
@@ -2322,14 +2336,20 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			transforms.emplace(m_app.getAllocator());
 		}
 
+		const double y_base = universe->getPosition((EntityRef)terrain).y;
+
 		for (float y = 0; y < m_bitmap_size; y += spacing) {
 			for (float x = 0; x < m_bitmap_size; x += spacing) {
 				if (m_bitmap[i32(x) + i32(y) * m_bitmap_size] == 0) continue;
 
 				DVec3 pos;
-				pos.x = (x + spacing * randFloat() * 0.9f - 0.45f) / (float)m_bitmap_size * m_osm_parser.m_scale;
+				pos.x = ((x + spacing * randFloat() * 0.9f - 0.45f) / (float)m_bitmap_size) * m_osm_parser.m_scale;
 				pos.z = (1 - (y + spacing * randFloat() * 0.9f - 0.45f) / (float)m_bitmap_size) * m_osm_parser.m_scale;
 				pos.y = render_scene->getTerrainHeightAt((EntityRef)terrain, (float)pos.x, (float)pos.z);
+
+				pos.x -= m_osm_parser.m_scale * 0.5f;
+				pos.y += y_base;
+				pos.z -= m_osm_parser.m_scale * 0.5f;
 
 				transforms[rand(0, prefabs_count - 1)].push({pos, Quat(Vec3(0, 1, 0), randFloat() * 2 * PI), 1});
 			}
