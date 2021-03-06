@@ -2574,7 +2574,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		WorldEditor& editor = m_app.getWorldEditor();
 		
-		ImGui::InputTextMultiline("Script", m_script, sizeof(m_script));
+		ImGui::SetNextItemWidth(-1);
+		ImGui::InputTextMultiline("##scr", m_script, sizeof(m_script));
 		if (ImGui::Button("Run")) execute(m_script);
 
 		static char tag_key[64] = "";
