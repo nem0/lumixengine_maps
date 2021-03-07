@@ -2408,12 +2408,14 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			for (u32 i = 0; i < (u32)way_points.size(); ++i) {
 				Vec3 dir = Vec3(1, 0, 0);
 				if (i > 0) {
-					dir = normalize(Vec3(way_points[i] - way_points[i - 1]));
+					dir = Vec3(way_points[i] - way_points[i - 1]);
 				}
 				else if (i < u32(way_points.size() - 1)) {
-					dir = normalize(Vec3(way_points[i + 1] - way_points[i]));
+					dir = Vec3(way_points[i + 1] - way_points[i]);
 				}
-				Quat rot = Quat::vec3ToVec3(Vec3(0, 0, 1), dir);
+				dir.y = 0;
+				dir = normalize(dir);
+				Quat rot = Quat::vec3ToVec3(Vec3(1, 0, 0), dir).conjugated();
 				transforms[rand(0, prefabs_count - 1)].push({way_points[i], rot, 1});
 			}
 		}
