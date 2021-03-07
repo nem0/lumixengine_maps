@@ -1391,68 +1391,74 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			file.close();
 		}
 
-		if (!file.open(albedo_path)) {
-			logError("Failed to create ", albedo_path);
-		}
-		else {
-			file << R"#(
-				layer {
-					red = { "/textures/common/red.tga", 0 },
-					green = { "/textures/common/red.tga", 1 },
-					blue = { "/textures/common/red.tga", 2 },
-					alpha = { "/textures/common/red.tga", 3 }
-				}
-				layer {
-					red = { "/textures/common/green.tga", 0 },
-					green = { "/textures/common/green.tga", 1 },
-					blue = { "/textures/common/green.tga", 2 },
-					alpha = { "/textures/common/green.tga", 3 }
-				}
-			)#";
-			file.close();
+		if (!os::fileExists(albedo_path)) {
+			if (!file.open(albedo_path)) {
+				logError("Failed to create ", albedo_path);
+			}
+			else {
+				file << R"#(
+					layer {
+						red = { "/textures/common/red.tga", 0 },
+						green = { "/textures/common/red.tga", 1 },
+						blue = { "/textures/common/red.tga", 2 },
+						alpha = { "/textures/common/red.tga", 3 }
+					}
+					layer {
+						red = { "/textures/common/green.tga", 0 },
+						green = { "/textures/common/green.tga", 1 },
+						blue = { "/textures/common/green.tga", 2 },
+						alpha = { "/textures/common/green.tga", 3 }
+					}
+				)#";
+				file.close();
+			}
 		}
 
-		if (!file.open(normal_path)) {
-			logError("Failed to create ", normal_path);
-		}
-		else {
-			file << R"#(
-				layer {
-					red = { "/textures/common/default_normal.tga", 0 },
-					green = { "/textures/common/default_normal.tga", 1 },
-					blue = { "/textures/common/default_normal.tga", 2 },
-					alpha = { "/textures/common/default_normal.tga", 3 }
-				}
-				layer {
-					red = { "/textures/common/default_normal.tga", 0 },
-					green = { "/textures/common/default_normal.tga", 1 },
-					blue = { "/textures/common/default_normal.tga", 2 },
-					alpha = { "/textures/common/default_normal.tga", 3 }
-				}
-			)#";
-			file.close();
+		if (!os::fileExists(normal_path)) {
+			if (!file.open(normal_path)) {
+				logError("Failed to create ", normal_path);
+			}
+			else {
+				file << R"#(
+					layer {
+						red = { "/textures/common/default_normal.tga", 0 },
+						green = { "/textures/common/default_normal.tga", 1 },
+						blue = { "/textures/common/default_normal.tga", 2 },
+						alpha = { "/textures/common/default_normal.tga", 3 }
+					}
+					layer {
+						red = { "/textures/common/default_normal.tga", 0 },
+						green = { "/textures/common/default_normal.tga", 1 },
+						blue = { "/textures/common/default_normal.tga", 2 },
+						alpha = { "/textures/common/default_normal.tga", 3 }
+					}
+				)#";
+				file.close();
+			}
 		}
 
 		StaticString<LUMIX_MAX_PATH> mat_path(file_info.m_dir, "/", file_info.m_basename, ".mat");
 		os::OutputFile mat_file;
-		if (mat_file.open(mat_path)) {
-			mat_file << R"#(
-				shader "/pipelines/terrain.shd"
-				texture ")#";
-			mat_file << file_info.m_basename;
-			mat_file << R"#(.raw"
-				texture "albedo_detail.ltc"
-				texture "normal_detail.ltc"
-				texture "/textures/common/white.tga"
-				texture ")#" << file_info.m_basename << R"#(.tga"
-				uniform("Detail distance", 50.000000)
-				uniform("Detail scale", 1.000000)
-				uniform("Noise UV scale", 0.200000)
-				uniform("Detail diffusion", 0.500000)
-				uniform("Detail power", 16.000000)
-			)#";
+		if (!os::fileExists(mat_path)) {
+			if (mat_file.open(mat_path)) {
+				mat_file << R"#(
+					shader "/pipelines/terrain.shd"
+					texture ")#";
+				mat_file << file_info.m_basename;
+				mat_file << R"#(.raw"
+					texture "albedo_detail.ltc"
+					texture "normal_detail.ltc"
+					texture "/textures/common/white.tga"
+					texture ")#" << file_info.m_basename << R"#(.tga"
+					uniform("Detail distance", 50.000000)
+					uniform("Detail scale", 1.000000)
+					uniform("Noise UV scale", 0.200000)
+					uniform("Detail diffusion", 0.500000)
+					uniform("Detail power", 16.000000)
+				)#";
 
-			mat_file.close();
+				mat_file.close();
+			}
 		}
 
 		StaticString<LUMIX_MAX_PATH> raw_meta_path(file_info.m_dir, "/", file_info.m_basename, ".raw.meta");
