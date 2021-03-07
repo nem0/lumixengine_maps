@@ -255,6 +255,42 @@ struct OSMParser {
 		, m_relations(m_app.getAllocator())
 	{}
 
+	void showNodes(const char* tag_key, const char* tag_value, EntityRef terrain, Ref<Array<UniverseView::Vertex>> out) {
+		WorldEditor& editor = m_app.getWorldEditor();
+		Universe* universe = editor.getUniverse();
+		RenderScene* scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
+		const double y_base = universe->getPosition(terrain).y;
+
+		for (pugi::xml_node& n : m_nodes) {
+			if (!hasTag(n, tag_key, tag_value)) continue;
+
+			DVec2 lat_lon;
+			if (!getNodeLatLon(n, Ref(lat_lon))) continue;
+			DVec3 p;
+			p.x = (lat_lon.y - m_min_lon) / m_lon_range * m_scale;
+			p.z = (m_min_lat + m_lat_range - lat_lon.x) / m_lat_range * m_scale;
+			p.y = scene->getTerrainHeightAt(terrain, (float)p.x, (float)p.z) + y_base;
+			p.x -= m_scale * 0.5f;
+			p.z -= m_scale * 0.5f;
+			
+			const float half_extents = m_scale * 0.5f;
+			Vec3 a = Vec3(p) + Vec3(0, 1, 0);
+	
+			const Vec3 n0(2, 0, 0);
+			const Vec3 n1(0, 0, 2);
+
+			const u32 color = randomColor().abgr();
+
+			out->push({a - n0 - n1, color});
+			out->push({a + n0 - n1, color});
+			out->push({a + n0 + n1, color});
+			
+			out->push({a - n0 - n1, color});
+			out->push({a + n0 + n1, color});
+			out->push({a - n0 + n1, color});
+		}
+	}
+
 	void showPolylines(const char* tag_key, const char* tag_value, EntityRef terrain, Ref<Array<UniverseView::Vertex>> out) {
 		IAllocator& allocator = m_app.getAllocator();
 		Multipolygon multipolygon(allocator);
@@ -304,6 +340,19 @@ struct OSMParser {
 			getWay(w, terrain, Ref(polygon));
 			createAreaMesh(polygon, terrain, randomColor().abgr(), out, allocator);
 		}
+	}
+
+	bool getNodeLatLon(pugi::xml_node n, Ref<DVec2> p) const {
+		pugi::xml_attribute lat_attr = n.attribute("lat");
+		pugi::xml_attribute lon_attr = n.attribute("lon");
+			
+		if (lat_attr.empty() || lon_attr.empty()) return false;
+
+		const double lat = atof(lat_attr.value());
+		const double lon = atof(lon_attr.value());
+
+		p = {lat, lon};
+		return true;
 	}
 
 	bool getLatLon(pugi::xml_node nd_ref, Ref<DVec2> p) const {
@@ -1801,6 +1850,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		REGISTER(unmaskTexture);
 		REGISTER(placeDecals);
 		REGISTER(placePrefabs);
+		REGISTER(placePrefabsAtWayNodes);
+		REGISTER(placePrefabsAtNodes);
 		REGISTER(paintGrass);
 		REGISTER(paintGround);
 		REGISTER(flattenPolylines);
@@ -2313,6 +2364,125 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 	}
 
+	void getPrefabs(lua_State* L, i32 idx, const char* key, Ref<Array<PrefabResource*>> prefabs) {
+		const int type = LuaWrapper::getField(L, idx, key);
+		if (type == LUA_TNIL) luaL_error(L, "missing `%s`", key);
+		if (type != LUA_TTABLE) luaL_error(L, "`%s` is not a table", key);
+		
+		WorldEditor& editor = m_app.getWorldEditor();
+		ResourceManagerHub& rm = editor.getEngine().getResourceManager();
+		LuaWrapper::forEachArrayItem<const char*>(L, -1, "array of strings expected", [&](const char* path){
+			prefabs->push(rm.load<PrefabResource>(Path(path)));
+		});
+		lua_pop(L, 1);
+	}
+
+	void placePrefabsAtWayNodes(lua_State* L) {
+		const WayDef def(L);
+
+		const EntityPtr terrain = getTerrain();
+		if (!terrain.isValid()) {
+			luaL_error(L, "no terrain is selected");
+		}
+
+		Array<PrefabResource*> prefabs(m_app.getAllocator());
+		getPrefabs(L, 1, "prefabs", Ref(prefabs));
+		if (prefabs.empty()) return;
+
+		WorldEditor& editor = m_app.getWorldEditor();
+		Universe* universe = editor.getUniverse();
+		RenderScene* scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
+		Array<Array<Transform>> transforms(m_app.getAllocator());
+		const i32 prefabs_count = prefabs.size();
+		for (const auto& prefab : prefabs) {
+			transforms.emplace(m_app.getAllocator());
+		}
+		const double y_base = universe->getPosition((EntityRef)terrain).y;
+		
+		Array<DVec3> way_points(m_app.getAllocator());
+		for (pugi::xml_node& w : m_osm_parser.m_ways) {
+			if (!m_osm_parser.hasTag(w, def.key, def.value)) continue;
+
+			way_points.clear();
+			m_osm_parser.getWay(w, (EntityRef)terrain, Ref(way_points));
+			for (u32 i = 0; i < (u32)way_points.size(); ++i) {
+				Vec3 dir = Vec3(1, 0, 0);
+				if (i > 0) {
+					dir = normalize(Vec3(way_points[i] - way_points[i - 1]));
+				}
+				else if (i < u32(way_points.size() - 1)) {
+					dir = normalize(Vec3(way_points[i + 1] - way_points[i]));
+				}
+				Quat rot = Quat::vec3ToVec3(Vec3(0, 0, 1), dir);
+				transforms[rand(0, prefabs_count - 1)].push({way_points[i], rot, 1});
+			}
+		}
+
+		FileSystem& fs = editor.getEngine().getFileSystem();
+		while (fs.hasWork()) {
+			os::sleep(10);
+			fs.processCallbacks();
+		}
+
+		editor.beginCommandGroup("maps_place_prefabs");
+		for (u32 i = 0; i < (u32)prefabs.size(); ++i) {
+			if (!transforms[i].empty()) editor.getPrefabSystem().instantiatePrefabs(*prefabs[i], transforms[i]);
+			prefabs[i]->decRefCount();
+		}
+		editor.endCommandGroup();
+	}
+
+
+	void placePrefabsAtNodes(lua_State* L) {
+		const WayDef def(L);
+
+		const EntityPtr terrain = getTerrain();
+		if (!terrain.isValid()) {
+			luaL_error(L, "no terrain is selected");
+		}
+
+		Array<PrefabResource*> prefabs(m_app.getAllocator());
+		getPrefabs(L, 1, "prefabs", Ref(prefabs));
+		if (prefabs.empty()) return;
+
+		WorldEditor& editor = m_app.getWorldEditor();
+		Universe* universe = editor.getUniverse();
+		RenderScene* scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
+		Array<Array<Transform>> transforms(m_app.getAllocator());
+		const i32 prefabs_count = prefabs.size();
+		for (const auto& prefab : prefabs) {
+			transforms.emplace(m_app.getAllocator());
+		}
+		const double y_base = universe->getPosition((EntityRef)terrain).y;
+		
+		for (pugi::xml_node& n : m_osm_parser.m_nodes) {
+			if (!m_osm_parser.hasTag(n, def.key, def.value)) continue;
+
+			DVec2 lat_lon;
+			if (!m_osm_parser.getNodeLatLon(n, Ref(lat_lon))) continue;
+			DVec3 p;
+			p.x = (lat_lon.y - m_osm_parser.m_min_lon) / m_osm_parser.m_lon_range * m_osm_parser.m_scale;
+			p.z = (m_osm_parser.m_min_lat + m_osm_parser.m_lat_range - lat_lon.x) / m_osm_parser.m_lat_range * m_osm_parser.m_scale;
+			p.y = scene->getTerrainHeightAt((EntityRef)terrain, (float)p.x, (float)p.z) + y_base;
+			p.x -= m_osm_parser.m_scale * 0.5f;
+			p.z -= m_osm_parser.m_scale * 0.5f;
+			transforms[rand(0, prefabs_count - 1)].push({p, Quat(Vec3(0, 1, 0), randFloat() * 2 * PI), 1});
+		}
+
+		FileSystem& fs = editor.getEngine().getFileSystem();
+		while (fs.hasWork()) {
+			os::sleep(10);
+			fs.processCallbacks();
+		}
+
+		editor.beginCommandGroup("maps_place_prefabs");
+		for (u32 i = 0; i < (u32)prefabs.size(); ++i) {
+			if (!transforms[i].empty()) editor.getPrefabSystem().instantiatePrefabs(*prefabs[i], transforms[i]);
+			prefabs[i]->decRefCount();
+		}
+		editor.endCommandGroup();
+	}
+
 	void placePrefabs(lua_State* L) {
 		float spacing;
 		if (!LuaWrapper::checkField(L, 1, "spacing", &spacing)) {
@@ -2324,18 +2494,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			luaL_error(L, "no terrain is selected");
 		}
 
-		const int type = LuaWrapper::getField(L, 1, "prefabs");
-		if (type == LUA_TNIL) luaL_error(L, "missing `prefabs`");
-		if (type != LUA_TTABLE) luaL_error(L, "`prefabs` is not a table");
-		WorldEditor& editor = m_app.getWorldEditor();
 		Array<PrefabResource*> prefabs(m_app.getAllocator());
-		ResourceManagerHub& rm = editor.getEngine().getResourceManager();
-		LuaWrapper::forEachArrayItem<const char*>(L, -1, "array of strings expected", [&](const char* path){
-			prefabs.push(rm.load<PrefabResource>(Path(path)));
-		});
-		lua_pop(L, 1);
+		getPrefabs(L, 1, "prefabs", Ref(prefabs));
 		if (prefabs.empty()) return;
 
+		WorldEditor& editor = m_app.getWorldEditor();
 		Universe* universe = editor.getUniverse();
 		RenderScene* render_scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
 		Array<Array<Transform>> transforms(m_app.getAllocator());
@@ -2682,6 +2845,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			ImGui::SameLine();
 			if (ImGui::Button("Show polyline")) {
 				m_osm_parser.showPolylines(tag_key, tag_value, (EntityRef)terrain, Ref(m_osm_tris));
+			}
+
+			ImGui::SameLine();
+			if (ImGui::Button("Show nodes")) {
+				m_osm_parser.showNodes(tag_key, tag_value, (EntityRef)terrain, Ref(m_osm_tris));
 			}
 		}
 		ImGui::SameLine();
