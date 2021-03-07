@@ -1794,9 +1794,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		REGISTER(growMask);
 		REGISTER(maskPolygons);
 		REGISTER(maskPolylines);
+		REGISTER(maskTexture);
 		REGISTER(noise);
 		REGISTER(unmaskPolylines);
 		REGISTER(unmaskPolygons);
+		REGISTER(unmaskTexture);
 		REGISTER(placeDecals);
 		REGISTER(placePrefabs);
 		REGISTER(paintGrass);
@@ -2375,18 +2377,43 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		editor.endCommandGroup();
 	}
 
-	void adjustHeight(const char* texture, float texture_scale, float hm_multiplier) {
+	static float sampleMask(const u8* mask, Vec2 uv, IVec2 size) {
+		const u32 w = size.x;
+		const u32 h = size.y;
+		const float a = fmodf(uv.x, float(w - 1));
+		const float b = fmodf(uv.y, float(h - 1));
+		
+		u32 a0 = u32(a);
+		u32 b0 = u32(b);
+		const float tx = a - a0;
+		const float ty = b - b0;
+		a0 = a0 % w;
+		b0 = b0 % h;
+
+		const float v00 = mask[a0 + b0 * w] / float(0xff);
+		const float v10 = mask[a0 + 1 + b0 * w] / float(0xff);
+		const float v11 = mask[a0 + 1 + b0 * w + w] / float(0xff);
+		const float v01 = mask[a0 + b0 * w + w] / float(0xff);
+
+		return lerp(
+			lerp(v00, v10, tx),
+			lerp(v01, v11, tx),
+			ty
+		);
+	};
+
+	stbi_uc* loadTexture(const char* texture, Ref<u32> mask_w, Ref<u32> mask_h) {
 		os::InputFile file;
 		if (!m_app.getEngine().getFileSystem().open(texture, Ref(file))) {
 			logError("Failed to open ", texture);
-			return;
+			return nullptr;
 		}
 		Array<u8> content(m_app.getAllocator());
 		content.resize((u32)file.size());
 		if (!file.read(content.begin(), content.byte_size())) {
 			logError("Failed to read ", texture);
 			file.close();
-			return;
+			return nullptr;
 		}
 		file.close();
 
@@ -2394,8 +2421,51 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		stbi_uc* rgba = stbi_load_from_memory(content.begin(), content.byte_size(), &w, &h, &ch, 1);
 		if (!rgba) {
 			logError("Failed to parse ", texture);
-			return;
+			return nullptr;
 		}
+		mask_w = w;
+		mask_h = h;
+		return rgba;
+	}
+
+	void maskTexture(const char* texture, float ref, float mask_scale) {
+		u32 mask_w, mask_h;
+		stbi_uc* mask = loadTexture(texture, Ref(mask_w), Ref(mask_h));
+		if (!mask) return;
+
+		u8* out = m_bitmap.begin();
+		for (u32 j = 0; j < m_bitmap_size; ++j) {
+			for (u32 i = 0; i < m_bitmap_size; ++i) {
+				const float k = fmodf(i * mask_scale, (float)mask_w);
+				const float l = fmodf(j * mask_scale, (float)mask_h);
+				u8& m = out[i + j * m_bitmap_size]; 
+				m = sampleMask(mask, Vec2(k, l), IVec2(mask_w, mask_h)) > ref ? 0xff : m;
+			}
+		}
+		stbi_image_free(mask);
+	}
+
+	void unmaskTexture(const char* texture, float ref, float mask_scale) {
+		u32 mask_w, mask_h;
+		stbi_uc* mask = loadTexture(texture, Ref(mask_w), Ref(mask_h));
+		if (!mask) return;
+
+		u8* out = m_bitmap.begin();
+		for (u32 j = 0; j < m_bitmap_size; ++j) {
+			for (u32 i = 0; i < m_bitmap_size; ++i) {
+				const float k = fmodf(i * mask_scale, (float)mask_w);
+				const float l = fmodf(j * mask_scale, (float)mask_h);
+				u8& m = out[i + j * m_bitmap_size]; 
+				m = sampleMask(mask, Vec2(k, l), IVec2(mask_w, mask_h)) > ref ? 0 : m;
+			}
+		}
+		stbi_image_free(mask);
+	}
+
+	void adjustHeight(const char* texture, float texture_scale, float hm_multiplier) {
+		u32 w, h;
+		stbi_uc* rgba = loadTexture(texture, Ref(w), Ref(h));
+		if (!rgba) return;
 
 		const Terrain* terrain = getSelectedTerrain();
 		if (!terrain) return;
@@ -2559,12 +2629,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			const StaticString<1024> osm_download_path("https://api.openstreetmap.org/api/0.6/map?bbox=", left, ",", bottom, ",", right, ",", top);
 			os::shellExecuteOpen(osm_download_path);
 		}
-		if (!m_osm_tris.empty()) {
-			ImGui::SameLine();
-			if (ImGui::Button(ICON_FA_TRASH "clear shapes")) {
-				m_osm_tris.clear();
-			}
-		}
 
 		if (!m_osm_tris.empty()) {
 			UniverseView& view = m_app.getWorldEditor().getView();
@@ -2580,8 +2644,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		WorldEditor& editor = m_app.getWorldEditor();
 		
-		ImGui::SetNextItemWidth(-1);
-		ImGui::InputTextMultiline("##scr", m_script, sizeof(m_script));
+		static ImVec2 size(-1, 200);
+		ImGui::InputTextMultiline("##scr", m_script, sizeof(m_script), size);
+		ImGuiEx::HSplitter("##scr_split", &size);
 		if (ImGui::Button("Run")) execute(m_script);
 
 		static char tag_key[64] = "";
