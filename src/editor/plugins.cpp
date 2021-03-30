@@ -1666,7 +1666,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			tex->onDataUpdated(0, 0, w, h);
 		}
 	}
-
+    
 	void onWindowGUI() override {
 		while (!m_queue.empty() && m_in_progress.size() < 8) {
 			MapsTask* task = m_queue.back();
@@ -1741,43 +1741,55 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 	}
 
-	void raster(const Array<IVec2>& points, u32 w, i32 change, Array<u8>& out) {
+	void raster(Span<const Vec2> points, u32 w, i32 change, Array<u8>& out) {
 		// naive polygon rasterization
-		if (points.empty()) return;
+		if (points.length() == 0) return;
 
+		float miny = FLT_MAX;
+		float maxy = -FLT_MAX;
+		for (Vec2 v : points) {
+			miny = minimum(v.y, miny);
+			maxy = maximum(v.y, maxy);
+		}
 		const i32 h = (i32)w;
-		for (i32 pixelY = 0; pixelY < h; ++pixelY) {
-			i32 nodeX[256];
+		const i32 from_y = clamp(i32(miny - 1), 0, h - 1);
+		const i32 to_y = clamp(i32(maxy + 1), 0, h - 1);
+
+		for (i32 pixelY = from_y; pixelY < to_y; ++pixelY) {
+			float nodeX[256];
 			u32 nodes = 0;
-			for (i32 i = 0; i < points.size() - 1; i++) {
-				if(i32(points[i + 1].y) == i32(points[i].y) && i32(points[i].y) == pixelY) {
-					ASSERT(nodes + 1 < lengthOf(nodeX));
-					nodeX[nodes] = points[i].x;
-					++nodes;
-					nodeX[nodes] = points[i + 1].x;
-					++nodes;
-				
-				}
-				else if (points[i + 1].y >= pixelY && points[i].y < pixelY ||
-					points[i + 1].y < pixelY && points[i].y >= pixelY)
-				{
+			const float y = (float)pixelY;
+			for (i32 i = 0; i < (i32)points.length() - 1; i++) {
+				const float y0 = points[i].y;
+				const float y1 = points[i + 1].y;
+				if (y1 >= y && y0 < y || y1 < y && y0 >= y) {
 					ASSERT(nodes < lengthOf(nodeX));
-					nodeX[nodes] = (i32)(points[i].x + (pixelY - (float)points[i].y) / (points[i + 1].y - (float)points[i].y) * (points[i + 1].x - (float)points[i].x));
+					const float t = (y - y0) / (y1 - y0);
+					ASSERT(t >= 0);
+					nodeX[nodes] = lerp(points[i].x, points[i + 1].x, t);
 					++nodes;
 				}
 			}
 
-			ASSERT((nodes & 1) == 0);
+			if ((nodes & 1) != 0) {
+				ASSERT(false);
+				logError("nodes == 1 ", points[0].x, ", ", points[0].y, " - ", points[2].x, ", ", points[2].y);
+				continue;
+			}
+
 			qsort(nodeX, nodes, sizeof(nodeX[0]), [](const void* a, const void* b){ 
-				int m = *(int*)a;
-				int n = *(int*)b;
+				float m = *(float*)a;
+				float n = *(float*)b;
 				return m == n ? 0 : (m < n ? -1 : 1); 
 			});
 
 			for (u32 i = 0; i < nodes; i += 2) {
-				nodeX[i] = clamp(nodeX[i], 0, w);
-				nodeX[i + 1] = clamp(nodeX[i + 1], 0, w);
-				for (i32 pixelX = nodeX[i]; pixelX < nodeX[i + 1]; pixelX++) {
+				const i32 from = i32(clamp(nodeX[i] - 1, 0.f, (float)w - 1));
+				const i32 to = i32(clamp(nodeX[i + 1] + 1, 0.f, (float)w - 1));
+
+				for (i32 pixelX = from; pixelX < to; ++pixelX) {
+					if (pixelX < nodeX[i]) continue;
+					if (pixelX > nodeX[i + 1]) continue;
 					u8& v = out[pixelX + pixelY * w];
 					v = (u8)clamp(i32(v) + change, 0, 255);
 				}
@@ -1864,6 +1876,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		LuaWrapper::execute(L, Span(src, src + stringLength(src)), "maps", 0);
 		lua_close(L);
+		m_app.getSettings().save();
 	}
 
 	struct WayDef {
@@ -1971,7 +1984,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	void rasterPolygons(const WayDef& def, bool mask) {
 		Array<DVec2> polygon(m_app.getAllocator());
-		Array<IVec2> points(m_app.getAllocator());
+		Array<Vec2> points(m_app.getAllocator());
 		
 		Array<u8>& bitmap = !def.inverted && mask ? m_bitmap : m_tmp_bitmap;
 		if (def.inverted || !mask) {
@@ -1988,7 +2001,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				points.clear();
 				for (const DVec2 p : polygon) {
 					const DVec2 tmp = toBitmap(p);
-					points.push(IVec2((i32)tmp.x, (i32)tmp.y));
+					points.push(Vec2(tmp));
 				}
 				raster(points, m_bitmap_size, 1, bitmap);
 			}
@@ -1997,7 +2010,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				points.clear();
 				for (const DVec2 p : polygon) {
 					DVec2 tmp = toBitmap(p);
-					points.push(IVec2((i32)tmp.x, (i32)tmp.y));
+					points.push(Vec2(tmp));
 				}
 				raster(points, m_bitmap_size, -1, bitmap);
 			}
@@ -2012,7 +2025,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 			for (const DVec2 p : polygon) {
 				DVec2 tmp = toBitmap(p);
-				points.push(IVec2((i32)tmp.x, (i32)tmp.y));
+				points.push(Vec2(tmp));
 			}
 			raster(points, m_bitmap_size, 1, bitmap);
 		}
@@ -2039,33 +2052,46 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	DVec2 toBitmap(const DVec2& p) const {
 		DVec2 tmp;
 		tmp = p;
-		tmp.x += m_osm_parser.m_scale * 0.5f; 
-		tmp.y += m_osm_parser.m_scale * 0.5f; 
+		const Terrain* terrain = getSelectedTerrain();
+		const Vec2 s = terrain->getSize();
 
-		tmp.x = tmp.x  / m_osm_parser.m_scale * (float)m_bitmap_size;
-		tmp.y = (1 - tmp.y  / m_osm_parser.m_scale) * (float)m_bitmap_size;
+		tmp.x += s.x * 0.5f; 
+		tmp.y += s.y * 0.5f; 
+
+		tmp.x = tmp.x / s.x * (float)(m_bitmap_size - 1);
+		tmp.y = (1 - tmp.y  / s.y) * (float)(m_bitmap_size - 1);
 		return tmp;
 	}
 
 	Vec2 toBitmap(const Vec2& p) const {
 		Vec2 tmp;
 		tmp = p;
-		tmp.x += m_osm_parser.m_scale * 0.5f; 
-		tmp.y += m_osm_parser.m_scale * 0.5f; 
+		const Terrain* terrain = getSelectedTerrain();
+		const Vec2 s = terrain->getSize();
+		tmp.x += s.x * 0.5f; 
+		tmp.y += s.y * 0.5f; 
 
-		tmp.x = tmp.x  / m_osm_parser.m_scale * (float)m_bitmap_size;
-		tmp.y = (1 - tmp.y  / m_osm_parser.m_scale) * (float)m_bitmap_size;
+		tmp.x = tmp.x  / s.x * (float)m_bitmap_size;
+		tmp.y = (1 - tmp.y  / s.y) * (float)m_bitmap_size;
 		return tmp;
 	}
 
 	void maskPolylines(lua_State* L) {
+		if (!getSelectedTerrain()) return;
+
 		const WayDef def(L);
-		rasterPolylines(1, def);
+		float width = 1;
+		LuaWrapper::getOptionalField<float>(L, 1, "width", &width);
+		rasterPolylines(1, def, width);
 	}
 
 	void unmaskPolylines(lua_State* L) {
+		if (!getSelectedTerrain()) return;
+
 		const WayDef def(L);
-		rasterPolylines(0, def);
+		float width = 1;
+		LuaWrapper::getOptionalField<float>(L, 1, "width", &width);
+		rasterPolylines(-1, def, width);
 	}
 
 	struct Tri2D {
@@ -2152,7 +2178,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	void flattenQuad(const Vec2* points, float h0, float h1, const Terrain& terrain, float line_width, float boundary_width) {
 		u16* ptr = (u16*)terrain.m_heightmap->data.getMutableData();
-		const u32 w = terrain.m_heightmap->width;
+		const u32 pixw = terrain.m_heightmap->width;
+		const u32 pixh = terrain.m_heightmap->height;
 		u16* hm_data = (u16*)terrain.m_heightmap->getData();
 
 		const Vec2 c0 = (points[0] + points[1]) * 0.5f;
@@ -2163,14 +2190,13 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		const Vec2 min = minimum(points[0], minimum(points[1], minimum(points[2], points[3])));
 		const Vec2 max = maximum(points[0], maximum(points[1], maximum(points[2], points[3])));
 		const float heights[] = {h0, h0, h1, h1};
-		const u32 h = u32(max.y) + 1 - u32(min.y);
 
-		const i32 from_y = clamp(i32(min.y + 0.5f), 0, terrain.m_heightmap->height);
-		const i32 to_y = clamp(i32(max.y + 0.5f), 0, terrain.m_heightmap->height);
+		const i32 from_y = clamp(i32(min.y - 1), 0, pixh);
+		const i32 to_y = clamp(i32(max.y + 1), 0, pixh);
 		for (i32 pixelY = from_y; pixelY < to_y; ++pixelY) {
 			Vec2 nodeXY[4];
 			u32 nodes = 0;
-			const float y = pixelY + 0.5f;
+			const float y = (float)pixelY;
 			for (i32 i = 0; i < 4; i++) {
 				const float y0 = points[i].y;
 				const float y1 = points[(i + 1) % 4].y;
@@ -2182,29 +2208,30 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				}
 			}
 
-			qsort(nodeXY, nodes, sizeof(nodeXY[0]), [](const void* a, const void* b){ 
-				const Vec2 m = *(const Vec2*)a;
-				const Vec2 n = *(const Vec2*)b;
-				return m.x == n.x ? 0 : (m.x < n.x ? -1 : 1); 
-			});
 			if ((nodes & 1) != 0) {
 				ASSERT(false);
 				logError("nodes == 1 ", points[0].x, ", ", points[0].y, " - ", points[2].x, ", ", points[2].y);
 				continue;
 			}
 
+			qsort(nodeXY, nodes, sizeof(nodeXY[0]), [](const void* a, const void* b){ 
+				const Vec2 m = *(const Vec2*)a;
+				const Vec2 n = *(const Vec2*)b;
+				return m.x == n.x ? 0 : (m.x < n.x ? -1 : 1); 
+			});
+
 			for (u32 i = 0; i < nodes; i += 2) {
-				const i32 from = i32(clamp(nodeXY[i].x, 0.f, (float)w) + 0.5f);
-				const i32 to = i32(clamp(nodeXY[i + 1].x, 0.f, (float)w) + 0.5f);
+				const i32 from = clamp(i32(nodeXY[i].x), 0, pixw);
+				const i32 to = clamp(i32(nodeXY[i + 1].x), 0, pixw);
 				const float rcp_xd = 1.f / (nodeXY[i + 1].x - nodeXY[i].x);
 				for (i32 pixelX = from; pixelX < to; ++pixelX) {
-					const float x = pixelX + 0.5f;
-					u16& v = hm_data[pixelX + pixelY * w];
+					const float x = (float)pixelX;
+					u16& v = hm_data[pixelX + (pixh - pixelY - 1) * pixw];
 					const float t = (x - nodeXY[i].x) * rcp_xd;
 					const float h = lerp(nodeXY[i].y, nodeXY[i + 1].y, t);
 					const Vec2 p(x, y);
 					const float center_dist = abs(dot(p - c0, n));
-					if (center_dist < line_width * 0.5f) {
+					if (center_dist < line_width * 0.5f || boundary_width < 0.001f) {
 						v = u16(h / terrain.m_scale.y * 0xffFF);
 					}
 					else {
@@ -2221,13 +2248,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	void flattenLine(const DVec3& prev, const DVec3& a, const DVec3& b, const DVec3& next, const Terrain& terrain, float line_width, float boundary_width) {
 		ASSERT(terrain.m_heightmap->format == gpu::TextureFormat::R16);
 		
-		if (squaredLength((b - a).xz()) > 9) {
-			DVec3 mid = (a + b) * 0.5f;
-			mid.y = terrain.getHeight((float)mid.x, (float)mid.z);
-			flattenLine(prev, a, mid, b, terrain, line_width, boundary_width);
-			flattenLine(a, mid, b, next, terrain, line_width, boundary_width);
-			return;
-		}
+		const float base_y = (float)m_app.getWorldEditor().getUniverse()->getPosition(terrain.m_entity).y;
 
 		const Vec2 a2d = Vec3(a).xz();
 		const Vec2 b2d = Vec3(b).xz();
@@ -2251,13 +2272,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		};
 
 		ASSERT(terrain.m_heightmap->width == terrain.m_heightmap->height);
-		const float s = terrain.m_heightmap->height / m_osm_parser.m_scale;
+		const float s = terrain.m_heightmap->height / terrain.getSize().x;
 		for (int i = 0; i < 4; ++i) {
-			points[i].x = points[i].x * s;
-			points[i].y = points[i].y * s;
+			points[i] = toBitmap(points[i]) - Vec2(0.5f);
 		}
 
-		flattenQuad(points, (float)a.y, (float)b.y, terrain, line_width * s, boundary_width * s);
+		flattenQuad(points, (float)a.y - base_y, (float)b.y - base_y, terrain, line_width * s, boundary_width * s);
 	}
 	
 	void placeDecals(lua_State* L) {
@@ -2321,7 +2341,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		float boundary_width = 3.f;
 		LuaWrapper::getOptionalField(L, 1, "line_width", &line_width);
 		LuaWrapper::getOptionalField(L, 1, "boundary_width", &boundary_width);
-
+		
 		for (pugi::xml_node& w : m_osm_parser.m_ways) {
 			if (!OSMParser::hasTag(w, def.key, def.value)) continue;
 
@@ -2341,33 +2361,41 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		terrain->m_heightmap->onDataUpdated(0, 0, terrain->m_heightmap->width, terrain->m_heightmap->height);
 	}
 
-	void rasterPolylines(u8 value, const WayDef& def) {
+	void rasterPolylines(i32 change, const WayDef& def, float width) {
 		Array<DVec2> polyline(m_app.getAllocator());
-
-		Array<u8>& bitmap = def.inverted ? m_tmp_bitmap : m_bitmap;
-		if (def.inverted) {
-			memset(m_tmp_bitmap.begin(), 0, m_tmp_bitmap.byte_size());
-		}
-
+		
 		for (pugi::xml_node& w : m_osm_parser.m_ways) {
 			if (!OSMParser::hasTag(w, def.key, def.value)) continue;
 
 			polyline.clear();
 			m_osm_parser.getWay(w, polyline);
 			for (i32 i = 0; i < polyline.size() - 1; ++i) {
-				const DVec2 a = toBitmap(polyline[i]);
-				const DVec2 b = toBitmap(polyline[i + 1]);
-				const IVec2 ia = IVec2((i32)a.x, (i32)a.y);
-				const IVec2 ib = IVec2((i32)b.x, (i32)b.y);
-				raster(value, ia, ib, m_bitmap_size, bitmap);
+				const DVec2 dir = normalize(polyline[i + 1] - polyline[i]) * 0.5 * double(width);
+				const DVec2 n = DVec2(dir.y, -dir.x);
+				const DVec2 a = toBitmap(polyline[i] + n - dir);
+				const DVec2 b = toBitmap(polyline[i + 1] + n + dir);
+				const DVec2 c = toBitmap(polyline[i + 1] - n + dir);
+				const DVec2 d = toBitmap(polyline[i] - n - dir);
+				const Vec2 vecs[] = {Vec2(a), Vec2(b), Vec2(c), Vec2(d), Vec2(a)};
+				raster(Span(vecs), m_bitmap_size, change, m_bitmap);
 			}
 		}
+/*
+		if (frome.isValid()) {
+			DVec2 fep = m_app.getWorldEditor().getUniverse()->getPosition((EntityRef)frome).xz();
+			DVec2 tep = m_app.getWorldEditor().getUniverse()->getPosition((EntityRef)toe).xz();
 
-		if (def.inverted) {
-			for (u32 i = 0, c = m_bitmap_size * m_bitmap_size; i < c; ++i) {
-				if (m_tmp_bitmap[i] == 0) m_bitmap[i] = value;
-			}
-		}
+			const DVec2 dir = normalize(fep - tep)  * 0.5 * double(width);
+			const DVec2 n = DVec2(dir.y, -dir.x);
+			const DVec2 aq = toBitmap(tep) + DVec2(xx, yy);
+			const DVec2 aw = toBitmap(fep) + DVec2(xx, yy);
+			const DVec2 a = toBitmap(tep + n - dir) + DVec2(xx, yy);
+			const DVec2 b = toBitmap(fep + n + dir) + DVec2(xx, yy);
+			const DVec2 c = toBitmap(fep - n + dir) + DVec2(xx, yy);
+			const DVec2 d = toBitmap(tep - n - dir) + DVec2(xx, yy);
+			const Vec2 vecs[] = {Vec2(a), Vec2(b), Vec2(c), Vec2(d), Vec2(a)};
+			raster(Span(vecs), m_bitmap_size, change, m_bitmap);
+		}	*/
 	}
 
 	void getPrefabs(lua_State* L, i32 idx, const char* key, Array<PrefabResource*>& prefabs) {
@@ -2462,6 +2490,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			transforms.emplace(m_app.getAllocator());
 		}
 		const double y_base = universe->getPosition((EntityRef)terrain).y;
+		const Vec2 s = scene->getTerrainSize((EntityRef)terrain);
 		
 		for (pugi::xml_node& n : m_osm_parser.m_nodes) {
 			if (!m_osm_parser.hasTag(n, def.key, def.value)) continue;
@@ -2469,11 +2498,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			DVec2 lat_lon;
 			if (!m_osm_parser.getNodeLatLon(n, lat_lon)) continue;
 			DVec3 p;
-			p.x = (lat_lon.y - m_osm_parser.m_min_lon) / m_osm_parser.m_lon_range * m_osm_parser.m_scale;
-			p.z = (m_osm_parser.m_min_lat + m_osm_parser.m_lat_range - lat_lon.x) / m_osm_parser.m_lat_range * m_osm_parser.m_scale;
+			p.x = (lat_lon.y - m_osm_parser.m_min_lon) / m_osm_parser.m_lon_range * s.x;
+			p.z = (m_osm_parser.m_min_lat + m_osm_parser.m_lat_range - lat_lon.x) / m_osm_parser.m_lat_range * s.y;
 			p.y = scene->getTerrainHeightAt((EntityRef)terrain, (float)p.x, (float)p.z) + y_base;
-			p.x -= m_osm_parser.m_scale * 0.5f;
-			p.z -= m_osm_parser.m_scale * 0.5f;
+			p.x -= s.x * 0.5f;
+			p.z -= s.y * 0.5f;
 			transforms[rand(0, prefabs_count - 1)].push({p, Quat(Vec3(0, 1, 0), randFloat() * 2 * PI), 1});
 		}
 
@@ -2516,19 +2545,24 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		const double y_base = universe->getPosition((EntityRef)terrain).y;
+		const Vec2 size = render_scene->getTerrainSize((EntityRef)terrain);
 
 		for (float y = 0; y < m_bitmap_size; y += spacing) {
 			for (float x = 0; x < m_bitmap_size; x += spacing) {
-				if (m_bitmap[i32(x) + i32(y) * m_bitmap_size] == 0) continue;
+				float fx = (x + spacing * randFloat() * 0.9f - spacing * 0.45f);
+				float fy = (y + spacing * randFloat() * 0.9f - spacing * 0.45f);
+				fx = clamp(fx, 0.f, (float)m_bitmap_size - 1);
+				fy = clamp(fy, 0.f, (float)m_bitmap_size - 1);
+				if (m_bitmap[i32(fx) + i32(fy) * m_bitmap_size] == 0) continue;
 
 				DVec3 pos;
-				pos.x = ((x + spacing * randFloat() * 0.9f - 0.45f) / (float)m_bitmap_size) * m_osm_parser.m_scale;
-				pos.z = (1 - (y + spacing * randFloat() * 0.9f - 0.45f) / (float)m_bitmap_size) * m_osm_parser.m_scale;
+				pos.x = (fx / (float)m_bitmap_size) * size.x;
+				pos.z = (1 - fy / (float)m_bitmap_size) * size.y;
 				pos.y = render_scene->getTerrainHeightAt((EntityRef)terrain, (float)pos.x, (float)pos.z);
 
-				pos.x -= m_osm_parser.m_scale * 0.5f;
+				pos.x -= size.x * 0.5f;
 				pos.y += y_base;
-				pos.z -= m_osm_parser.m_scale * 0.5f;
+				pos.z -= size.y * 0.5f;
 
 				transforms[rand(0, prefabs_count - 1)].push({pos, Quat(Vec3(0, 1, 0), randFloat() * 2 * PI), 1});
 			}
@@ -2728,8 +2762,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 
 		auto is_masked = [&](u32 x, u32 y){
-			u32 i = u32(x / float(splatmap->width) * m_bitmap_size + 0.5f);
-			u32 j = u32(y / float(splatmap->height) * m_bitmap_size + 0.5f);
+			u32 i = u32(x / float(splatmap->width) * m_bitmap_size);
+			u32 j = u32(y / float(splatmap->height) * m_bitmap_size);
 			i = clamp(i, 0, m_bitmap_size - 1);
 			j = clamp(j, 0, m_bitmap_size - 1);
 			
