@@ -991,6 +991,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		m_app.getSettings().setValue("maps_offset_x", m_pixel_offset.x);
 		m_app.getSettings().setValue("maps_offset_y", m_pixel_offset.y);
 		m_app.getSettings().setValue("maps_size", m_size);
+		m_app.getSettings().setValue("maps_osm_area_edge", m_area_edge);
 	}
 
 	void onSettingsLoaded() override {
@@ -998,6 +999,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		m_x = m_app.getSettings().getValue("maps_x", 0);
 		m_y = m_app.getSettings().getValue("maps_y", 0);
 		m_scale = m_app.getSettings().getValue("maps_scale", 1.f);
+		m_area_edge = m_app.getSettings().getValue("maps_osm_area_edge", 0);
 		m_resample_hm = m_app.getSettings().getValue("maps_resample", 1);
 		m_zoom = m_app.getSettings().getValue("maps_zoom", 1);
 		m_pixel_offset.x = m_app.getSettings().getValue("maps_offset_x", 0);
