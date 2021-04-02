@@ -985,6 +985,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		m_app.getSettings().setValue("is_maps_plugin_open", m_open);
 		m_app.getSettings().setValue("maps_x", m_x);
 		m_app.getSettings().setValue("maps_y", m_y);
+		m_app.getSettings().setValue("maps_scale", m_scale);
+		m_app.getSettings().setValue("maps_resample", m_resample_hm);
 		m_app.getSettings().setValue("maps_zoom", m_zoom);
 		m_app.getSettings().setValue("maps_offset_x", m_pixel_offset.x);
 		m_app.getSettings().setValue("maps_offset_y", m_pixel_offset.y);
@@ -995,6 +997,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		m_open = m_app.getSettings().getValue("is_maps_plugin_open", false);
 		m_x = m_app.getSettings().getValue("maps_x", 0);
 		m_y = m_app.getSettings().getValue("maps_y", 0);
+		m_scale = m_app.getSettings().getValue("maps_scale", 1.f);
+		m_resample_hm = m_app.getSettings().getValue("maps_resample", 1);
 		m_zoom = m_app.getSettings().getValue("maps_zoom", 1);
 		m_pixel_offset.x = m_app.getSettings().getValue("maps_offset_x", 0);
 		m_pixel_offset.y = m_app.getSettings().getValue("maps_offset_y", 0);
@@ -1223,7 +1227,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	void createMapEntity() {
 		const double lat = double(tiley2lat(double(m_y + (1 << (m_size - 1))), m_zoom));
-		const double width = 256 * (1 << m_size) * 156543.03 * cos(degreesToRadians(lat)) / (1 << m_zoom);
+		const double width = m_scale * 256 * (1 << m_size) * 156543.03 * cos(degreesToRadians(lat)) / (1 << m_zoom);
 		WorldEditor& editor = m_app.getWorldEditor();
 		const EntityRef e = editor.addEntityAt({-width * 0.5, m_last_saved_hm_range.x, -width * 0.5});
 		editor.addComponent(Span(&e, 1), TERRAIN_TYPE);
@@ -1237,11 +1241,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		editor.setProperty(TERRAIN_TYPE, "", -1, "Material", Span(&e, 1), Path(rel_mat_path));
 
 		const float scale = float(width / ((1 << m_size) * 256));
-		editor.setProperty(TERRAIN_TYPE, "", -1, "XZ scale", Span(&e, 1), scale / m_scale_hm);
-		editor.setProperty(TERRAIN_TYPE, "", -1, "Height scale", Span(&e, 1), m_last_saved_hm_range.y - m_last_saved_hm_range.x);
+		editor.setProperty(TERRAIN_TYPE, "", -1, "XZ scale", Span(&e, 1), scale / m_resample_hm);
+		editor.setProperty(TERRAIN_TYPE, "", -1, "Height scale", Span(&e, 1), m_scale * (m_last_saved_hm_range.y - m_last_saved_hm_range.x));
 	}
 
-	void rescale(Array<u16>& raw, i32 map_size, i32 scale) {
+	void resample(Array<u16>& raw, i32 map_size, i32 scale) {
 		Array<u16> tmp(m_app.getAllocator());
 		const i32 stride = map_size * scale;
 		tmp.resize(map_size * map_size * scale * scale);
@@ -1362,11 +1366,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		header.channel_type = RawTextureHeader::ChannelType::U16;
 		header.depth = 1;
 		header.is_array = false;
-		header.width = map_size * m_scale_hm;
-		header.height = map_size * m_scale_hm;
+		header.width = map_size * m_resample_hm;
+		header.height = map_size * m_resample_hm;
 		bool success = file.write(&header, sizeof(header));
-		if (m_scale_hm > 1) {
-			rescale(raw, map_size, m_scale_hm);
+		if (m_resample_hm > 1) {
+			resample(raw, map_size, m_resample_hm);
 		}
 		success = file.write(&raw[0], raw.byte_size()) && success;
 		if (!success) {
@@ -2819,19 +2823,29 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	}
 
 	void OSMGUI() {
+		double dl_bottom = double(tiley2lat(double(m_y - (m_pixel_offset.y - m_area_edge) / 256.0), m_zoom));
+		double dl_left = double(tilex2long(double(m_x - (m_pixel_offset.x - m_area_edge) / 256.0), m_zoom));
+		double dl_top = double(tiley2lat(double(m_y - m_area_edge / 256.0 - m_pixel_offset.y / 256.0 + (1 << m_size)), m_zoom));
+		double dl_right = double(tilex2long(double(m_x - m_area_edge / 256.0 - m_pixel_offset.x / 256.0 + (1 << m_size)), m_zoom));
+
 		double bottom = double(tiley2lat(double(m_y - m_pixel_offset.y / 256.0), m_zoom));
 		double left = double(tilex2long(double(m_x - m_pixel_offset.x / 256.0), m_zoom));
 		double top = double(tiley2lat(double(m_y - m_pixel_offset.y / 256.0 + (1 << m_size)), m_zoom));
 		double right = double(tilex2long(double(m_x - m_pixel_offset.x / 256.0 + (1 << m_size)), m_zoom));
 		if (bottom > top) swap(bottom, top);
 		if (left > right) swap(left, right);
+		if (dl_bottom > dl_top) swap(dl_bottom, dl_top);
+		if (dl_left > dl_right) swap(dl_left, dl_right);
 
-		const float scale = float(256 * (1 << m_size) * 156543.03 * cos(degreesToRadians(bottom)) / (1 << m_zoom));
+		const float scale = m_scale * float(256 * (1 << m_size) * 156543.03 * cos(degreesToRadians(bottom)) / (1 << m_zoom));
+
+		ImGuiEx::Label("Area edge");
+		ImGui::DragInt("##areaedge", &m_area_edge);
 
 		if (ImGui::Button("Load map.osm")) parseOSMData(left, bottom, right, top, scale);
 		ImGui::SameLine();
 		if (ImGui::Button(ICON_FA_FILE_DOWNLOAD "download OSM data")) {
-			const StaticString<1024> osm_download_path("https://api.openstreetmap.org/api/0.6/map?bbox=", left, ",", bottom, ",", right, ",", top);
+			const StaticString<1024> osm_download_path("https://api.openstreetmap.org/api/0.6/map?bbox=", dl_left, ",", dl_bottom, ",", dl_right, ",", dl_top);
 			os::shellExecuteOpen(osm_download_path);
 		}
 
@@ -2921,8 +2935,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			ImGui::Text("Heightmap might have artifacts at this level.");
 		}
 
-		ImGuiEx::Label("Heightmap scale");
-		ImGui::InputInt("##hmscale", &m_scale_hm);
+		ImGuiEx::Label("Scale");
+		ImGui::DragFloat("##objscale", &m_scale);
+
+		ImGuiEx::Label("Resample");
+		ImGui::InputInt("##hmresample", &m_resample_hm);
 		ImGuiEx::Label("Output");
 		if (ImGui::Button(StaticString<LUMIX_MAX_PATH + 128>(m_out_path[0] ? m_out_path : "Click to set"), ImVec2(-1, 0))) {
 			browse();
@@ -3052,13 +3069,14 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	volatile i32 m_downloaded_bytes = 0;
 	bool m_open = false;
 	bool m_is_download_deferred = true;
-	int m_zoom = 1;
-	int m_scale_hm = 1;
-	int m_x = 0;
-	int m_y = 0;
+	i32 m_zoom = 1;
+	float m_scale = 1.f;
+	i32 m_resample_hm = 1;
+	i32 m_x = 0;
+	i32 m_y = 0;
 	IVec2 m_pixel_offset{0, 0};
-	// TODO handle values other than 1
-	int m_size = 1;
+	i32 m_area_edge = 0;
+	i32 m_size = 1;
 	char m_out_path[LUMIX_MAX_PATH];
 	IVec2 m_drag_start_offset;
 	bool m_is_dragging = false;
