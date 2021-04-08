@@ -966,6 +966,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		, m_osm_tris(app.getAllocator())
 		, m_bitmap(app.getAllocator())
 		, m_tmp_bitmap(app.getAllocator())
+		, m_distance_field(app.getAllocator())
 	{
 		#ifdef _WIN32
 			WORD sockVer;
@@ -1485,6 +1486,88 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 	}
 
+	void computeDistanceField() {
+		Array<IVec2> data_ar(m_app.getAllocator());
+
+		data_ar.resize(m_bitmap_size * m_bitmap_size);
+		IVec2* data = data_ar.begin();
+		m_distance_field.resize(m_bitmap_size * m_bitmap_size);
+		const u32 w = m_bitmap_size;
+		const u32 h = m_bitmap_size;
+
+		auto check_neighbour = [](const IVec2& p, IVec2* n, IVec2 ij) {
+			IVec2 a = p - ij;
+			IVec2 b = *n - ij;
+			if (a.x * a.x + a.y * a.y < b.x * b.x + b.y * b.y) {
+				*n = p;
+			}
+		};
+
+		const u8* bitmap = m_bitmap.begin();
+		for (i32 j = 0; j < (i32)h; ++j) {
+			for (i32 i = 0; i < (i32)w; ++i) {
+				if (bitmap[i + j * m_bitmap_size] != 0) {
+					data[i + j * m_bitmap_size] = IVec2(i, j);
+				}
+				else {
+					data[i + j * m_bitmap_size] = IVec2(INT_MIN, INT_MIN);
+				}
+			}
+		}
+
+		for (i32 j = 0; j < (i32)h; ++j) {
+			const int j0 = maximum(j - 1, 0);
+			for (i32 i = 0; i < (i32)w; ++i) {
+				const int i0 = maximum(i - 1, 0);
+				const int i1 = minimum(i + 1, w - 1);
+
+				IVec2* n = &data[i + j * w];
+				IVec2 ij(i, j);
+				check_neighbour(data[i0 + j0 * w], n, ij);
+				check_neighbour(data[i + j0 * w], n, ij);
+				check_neighbour(data[i1 + j0 * w], n, ij);
+				check_neighbour(data[i0 + j * w], n, ij);
+			}
+
+			for (int i = w - 1; i >= 0; --i) {
+				const int i1 = minimum(i + 1, w - 1);
+
+				IVec2* n = &data[j * w + i];
+				IVec2 ij(i, j);
+				check_neighbour(data[j * w + i1], n, ij);
+			}
+		}
+
+		for (int j = h - 1; j >= 0; --j) {
+			const int j0 = minimum(j + 1, h - 1);
+			for (int i = w - 1; i >= 0; --i) {
+				const int i0 = maximum(i - 1, 0);
+				const int i1 = minimum(i + 1, w - 1);
+
+				IVec2* n = &data[i + j * w];
+				IVec2 ij(i, j);
+				check_neighbour(data[i1 + j0 * w], n, ij);
+				check_neighbour(data[i + j0 * w], n, ij);
+				check_neighbour(data[i0 + j0 * w], n, ij);
+				check_neighbour(data[i1 + j * w], n, ij);
+			}
+
+			for (int i = w - 1; i >= 0; --i) {
+				const int i0 = maximum(i - 1, 0);
+
+				IVec2* n = &data[j * w + i];
+				IVec2 ij(i, j);
+				check_neighbour(data[j * w + i0], n, ij);
+			}
+		}
+
+		for (u32 j = 0; j < h; ++j) {
+			for (u32 i = 0; i < w; ++i) {
+				const float d = length(Vec2(data[i + j * w] - IVec2(i, j)));
+				m_distance_field[i + j * w] = d;
+			}
+		}
+	}
 
 	void checkTasks()
 	{
@@ -1862,6 +1945,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		REGISTER(adjustHeight);
 		REGISTER(clearMask);
+		REGISTER(computeDistanceField);
 		REGISTER(invertMask);
 		REGISTER(shrinkMask);
 		REGISTER(growMask);
@@ -1974,21 +2058,25 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	void clearMask(u32 size) {
 		m_bitmap.resize(size * size);
 		m_tmp_bitmap.resize(size * size);
+		m_distance_field.clear();
 		memset(m_bitmap.begin(), 0, m_bitmap.byte_size());
 		m_bitmap_size = size;
 	}
 
 	void maskPolygons(lua_State* L) {
 		const WayDef def(L);
-		rasterPolygons(def, true);
+		rasterPolygons(def, true, L);
 	}
 
 	void unmaskPolygons(lua_State* L) {
 		const WayDef def(L);
-		rasterPolygons(def, false);
+		rasterPolygons(def, false, L);
 	}
 
-	void rasterPolygons(const WayDef& def, bool mask) {
+	void rasterPolygons(const WayDef& def, bool mask, lua_State* L) {
+		const Terrain* terrain = getSelectedTerrain();
+		if (!terrain) luaL_error(L, "no terrain is selected");
+
 		Array<DVec2> polygon(m_app.getAllocator());
 		Array<Vec2> points(m_app.getAllocator());
 		
@@ -2417,6 +2505,55 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		lua_pop(L, 1);
 	}
 
+	struct PrefabProbability {
+		PrefabResource* resource;
+		Vec4 distances;
+		float multiplier = 1.f;
+	};
+
+	void getPrefabs(lua_State* L, i32 idx, const char* key, Array<PrefabProbability>& prefabs) {
+		const int type = LuaWrapper::getField(L, idx, key);
+		if (type == LUA_TNIL) luaL_error(L, "missing `%s`", key);
+		if (type != LUA_TTABLE) luaL_error(L, "`%s` is not a table", key);
+		
+		WorldEditor& editor = m_app.getWorldEditor();
+		ResourceManagerHub& rm = editor.getEngine().getResourceManager();
+	
+		const i32 n = (int)lua_objlen(L, -1);
+		for (i32 i = 0; i < n; ++i) {
+			lua_rawgeti(L, -1, i + 1);
+			if(lua_istable(L, -1)) {
+				if (LuaWrapper::getField(L, -1, "prefab") != LUA_TSTRING) {
+					lua_pop(L, 1);
+					luaL_argerror(L, idx, "'prefab' is not string or is missing");
+				}
+				const char* prefab_path = LuaWrapper::toType<const char*>(L, -1);
+				PrefabResource* res = rm.load<PrefabResource>(Path(prefab_path));
+				lua_pop(L, 1);
+				lua_getfield(L, -1, "distances");
+				if (!LuaWrapper::isType<Vec4>(L, -1)) {
+					lua_pop(L, 1);
+					res->decRefCount();
+					luaL_argerror(L, idx, "'distances' is not vec4 or is missing");
+				}
+				const Vec4 distances = LuaWrapper::toType<Vec4>(L, -1);
+				lua_pop(L, 1);
+
+				PrefabProbability& prob = prefabs.emplace();
+				LuaWrapper::getOptionalField(L, -1, "multiplier", &prob.multiplier);
+				prob.resource = res;
+				prob.distances = distances;
+			}
+			else {
+				lua_pop(L, 1);
+				luaL_argerror(L, idx, "table of prefabs expected");
+			}
+			lua_pop(L, 1);
+		}
+
+		lua_pop(L, 1);
+	}
+
 	void placePrefabsAtWayNodes(lua_State* L) {
 		const WayDef def(L);
 
@@ -2526,18 +2663,55 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		editor.endCommandGroup();
 	}
 
+	static u32 getRandomPrefab(float distance, const Array<PrefabProbability>& probs) {
+		float sum = 0;
+
+		auto get = [](float distance, const PrefabProbability& prob){
+			if (distance < prob.distances.x) return 0.f;
+			if (distance > prob.distances.w) return 0.f;
+			
+			if (distance < prob.distances.y) {
+				return prob.multiplier * (distance - prob.distances.x) / (prob.distances.y - prob.distances.x);
+			}
+			else if (distance < prob.distances.z) {
+				return prob.multiplier;
+			}
+			return prob.multiplier * (1 - (distance - prob.distances.z) / (prob.distances.w - prob.distances.z));
+		};
+
+		for (const PrefabProbability& prob : probs) {
+			sum += get(distance, prob);
+		}
+		if (sum == 0) return 0;
+		
+		float r = randFloat() * sum;
+
+		for (i32 i = 0; i < probs.size(); ++i) {
+			const PrefabProbability& prob = probs[i];
+			float p = get(distance, prob);
+			if (r < p) return i;
+			r -= p;
+		}
+		
+		ASSERT(false);
+		return 0;
+	}
+
 	void placePrefabs(lua_State* L) {
 		float spacing;
 		if (!LuaWrapper::checkField(L, 1, "spacing", &spacing)) {
 			luaL_error(L, "missing `spacing`");
 		}
 
+		if (m_distance_field.empty()) luaL_error(L, "no distance field");
+		ASSERT(m_distance_field.size() == m_bitmap_size * m_bitmap_size);
+
 		const EntityPtr terrain = getTerrain();
 		if (!terrain.isValid()) {
 			luaL_error(L, "no terrain is selected");
 		}
 
-		Array<PrefabResource*> prefabs(m_app.getAllocator());
+		Array<PrefabProbability> prefabs(m_app.getAllocator());
 		getPrefabs(L, 1, "prefabs", prefabs);
 		if (prefabs.empty()) return;
 
@@ -2555,22 +2729,25 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		for (float y = 0; y < m_bitmap_size; y += spacing) {
 			for (float x = 0; x < m_bitmap_size; x += spacing) {
-				float fx = (x + spacing * randFloat() * 0.9f - spacing * 0.45f);
-				float fy = (y + spacing * randFloat() * 0.9f - spacing * 0.45f);
-				fx = clamp(fx, 0.f, (float)m_bitmap_size - 1);
-				fy = clamp(fy, 0.f, (float)m_bitmap_size - 1);
-				if (m_bitmap[i32(fx) + i32(fy) * m_bitmap_size] == 0) continue;
+				const float distance = m_distance_field[i32(x) + i32(y) * m_bitmap_size];
+				if (distance > 0.01f) {
+					float fx = (x + spacing * randFloat() * 0.9f - spacing * 0.45f);
+					float fy = (y + spacing * randFloat() * 0.9f - spacing * 0.45f);
+					fx = clamp(fx, 0.f, (float)m_bitmap_size - 1);
+					fy = clamp(fy, 0.f, (float)m_bitmap_size - 1);
 
-				DVec3 pos;
-				pos.x = (fx / (float)m_bitmap_size) * size.x;
-				pos.z = (1 - fy / (float)m_bitmap_size) * size.y;
-				pos.y = render_scene->getTerrainHeightAt((EntityRef)terrain, (float)pos.x, (float)pos.z);
+					DVec3 pos;
+					pos.x = (fx / (float)m_bitmap_size) * size.x;
+					pos.z = (1 - fy / (float)m_bitmap_size) * size.y;
+					pos.y = render_scene->getTerrainHeightAt((EntityRef)terrain, (float)pos.x, (float)pos.z);
 
-				pos.x -= size.x * 0.5f;
-				pos.y += y_base;
-				pos.z -= size.y * 0.5f;
+					pos.x -= size.x * 0.5f;
+					pos.y += y_base;
+					pos.z -= size.y * 0.5f;
 
-				transforms[rand(0, prefabs_count - 1)].push({pos, Quat(Vec3(0, 1, 0), randFloat() * 2 * PI), 1});
+					const u32 r = getRandomPrefab(distance, prefabs);
+					transforms[r].push({pos, Quat(Vec3(0, 1, 0), randFloat() * 2 * PI), 1});
+				}
 			}
 		}
 
@@ -2582,8 +2759,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		editor.beginCommandGroup("maps_place_prefabs");
 		for (u32 i = 0; i < (u32)prefabs.size(); ++i) {
-			if (!transforms[i].empty()) editor.getPrefabSystem().instantiatePrefabs(*prefabs[i], transforms[i]);
-			prefabs[i]->decRefCount();
+			if (!transforms[i].empty()) editor.getPrefabSystem().instantiatePrefabs(*prefabs[i].resource, transforms[i]);
+			prefabs[i].resource->decRefCount();
 		}
 		editor.endCommandGroup();
 	}
@@ -3063,6 +3240,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	)#";
 	Array<u8> m_tmp_bitmap;
 	Array<u8> m_bitmap;
+	Array<float> m_distance_field;
 	u32 m_bitmap_size;
 	Array<TileData*> m_tiles;
 	Array<TileData*> m_cache;
