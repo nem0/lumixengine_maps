@@ -983,30 +983,30 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	}
 	
 	void onBeforeSettingsSaved() override {
-		m_app.getSettings().setValue("is_maps_plugin_open", m_open);
-		m_app.getSettings().setValue("maps_x", m_x);
-		m_app.getSettings().setValue("maps_y", m_y);
-		m_app.getSettings().setValue("maps_scale", m_scale);
-		m_app.getSettings().setValue("maps_resample", m_resample_hm);
-		m_app.getSettings().setValue("maps_zoom", m_zoom);
-		m_app.getSettings().setValue("maps_offset_x", m_pixel_offset.x);
-		m_app.getSettings().setValue("maps_offset_y", m_pixel_offset.y);
-		m_app.getSettings().setValue("maps_size", m_size);
-		m_app.getSettings().setValue("maps_osm_area_edge", m_area_edge);
+		m_app.getSettings().setValue(Settings::GLOBAL, "is_maps_plugin_open", m_open);
+		m_app.getSettings().setValue(Settings::LOCAL, "maps_x", m_x);
+		m_app.getSettings().setValue(Settings::LOCAL, "maps_y", m_y);
+		m_app.getSettings().setValue(Settings::LOCAL, "maps_scale", m_scale);
+		m_app.getSettings().setValue(Settings::LOCAL, "maps_resample", m_resample_hm);
+		m_app.getSettings().setValue(Settings::LOCAL, "maps_zoom", m_zoom);
+		m_app.getSettings().setValue(Settings::LOCAL, "maps_offset_x", m_pixel_offset.x);
+		m_app.getSettings().setValue(Settings::LOCAL, "maps_offset_y", m_pixel_offset.y);
+		m_app.getSettings().setValue(Settings::LOCAL, "maps_size", m_size);
+		m_app.getSettings().setValue(Settings::LOCAL, "maps_osm_area_edge", m_area_edge);
 	}
 
 	void onSettingsLoaded() override {
-		m_open = m_app.getSettings().getValue("is_maps_plugin_open", false);
-		m_x = m_app.getSettings().getValue("maps_x", 0);
-		m_y = m_app.getSettings().getValue("maps_y", 0);
-		m_scale = m_app.getSettings().getValue("maps_scale", 1.f);
-		m_area_edge = m_app.getSettings().getValue("maps_osm_area_edge", 0);
-		m_resample_hm = m_app.getSettings().getValue("maps_resample", 1);
-		m_zoom = m_app.getSettings().getValue("maps_zoom", 1);
-		m_pixel_offset.x = m_app.getSettings().getValue("maps_offset_x", 0);
-		m_pixel_offset.y = m_app.getSettings().getValue("maps_offset_y", 0);
-		m_size = m_app.getSettings().getValue("maps_size", 1);
-		const u32 len = m_app.getSettings().getValue("maps_script", Span(m_script));
+		m_open = m_app.getSettings().getValue(Settings::GLOBAL, "is_maps_plugin_open", false);
+		m_x = m_app.getSettings().getValue(Settings::LOCAL, "maps_x", 0);
+		m_y = m_app.getSettings().getValue(Settings::LOCAL, "maps_y", 0);
+		m_scale = m_app.getSettings().getValue(Settings::LOCAL, "maps_scale", 1.f);
+		m_area_edge = m_app.getSettings().getValue(Settings::LOCAL, "maps_osm_area_edge", 0);
+		m_resample_hm = m_app.getSettings().getValue(Settings::LOCAL, "maps_resample", 1);
+		m_zoom = m_app.getSettings().getValue(Settings::LOCAL, "maps_zoom", 1);
+		m_pixel_offset.x = m_app.getSettings().getValue(Settings::LOCAL, "maps_offset_x", 0);
+		m_pixel_offset.y = m_app.getSettings().getValue(Settings::LOCAL, "maps_offset_y", 0);
+		m_size = m_app.getSettings().getValue(Settings::LOCAL, "maps_size", 1);
+		const u32 len = m_app.getSettings().getValue(Settings::LOCAL, "maps_script", Span(m_script));
 		if (len == 0) m_script[0] = '\0';
 		if (len >= lengthOf(m_script)) {
 			logWarning("Map script saved in settings is too long");
@@ -1932,7 +1932,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	}
 
 	void execute(const char* src) {
-		m_app.getSettings().setValue("maps_script", src);
+		m_app.getSettings().setValue(Settings::LOCAL, "maps_script", src);
 		lua_State* L = luaL_newstate();
 
 		#define REGISTER(F) \
