@@ -2058,7 +2058,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	void clearMask(u32 size) {
 		m_bitmap.resize(size * size);
 		m_tmp_bitmap.resize(size * size);
-		m_distance_field.clear();
 		memset(m_bitmap.begin(), 0, m_bitmap.byte_size());
 		m_bitmap_size = size;
 	}
@@ -2729,8 +2728,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		for (float y = 0; y < m_bitmap_size; y += spacing) {
 			for (float x = 0; x < m_bitmap_size; x += spacing) {
-				const float distance = m_distance_field[i32(x) + i32(y) * m_bitmap_size];
-				if (distance > 0.01f) {
+				const i32 idx = i32(x) + i32(y) * m_bitmap_size;
+				const float distance = m_distance_field[idx];
+				if (distance > 0.01f && m_bitmap[idx]) {
 					float fx = (x + spacing * randFloat() * 0.9f - spacing * 0.45f);
 					float fy = (y + spacing * randFloat() * 0.9f - spacing * 0.45f);
 					fx = clamp(fx, 0.f, (float)m_bitmap_size - 1);
@@ -3231,7 +3231,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	bool m_show_hm = false;
 	StudioApp& m_app;
-	char m_script[4096] = R"#(
+	char m_script[8192] = R"#(
 		clearMask(1024)
 		maskPolygons { key = "landuse", inverted = true }
 		unmaskPolylines { key = "highway" }
