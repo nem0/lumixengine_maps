@@ -2375,6 +2375,16 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	
 	void placeDecals(lua_State* L) {
 		const WayDef def(L);
+		
+		char material_path[LUMIX_MAX_PATH];
+		if (!LuaWrapper::checkStringField(L, 1, "material", Span(material_path))) {
+			luaL_error(L, "missing material");
+		}
+		float width;
+		if (!LuaWrapper::checkField<float>(L, 1, "width", &width)) {
+			luaL_error(L, "missing width");
+		}
+
 
 		Array<DVec3> polyline(m_app.getAllocator());
 		const EntityPtr terrain_entity = getTerrain();
@@ -2401,11 +2411,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				const Quat rot = Quat::vec3ToVec3(dir, Vec3(1, 0, 0)).conjugated();
 				editor.setEntitiesRotations(&e, &rot, 1);
 				editor.addComponent(Span(&e, 1), CURVE_DECAL_TYPE);
-				editor.setProperty(CURVE_DECAL_TYPE, "", 0, "Material", Span(&e, 1), Path("models/decals/road.mat"));
+				editor.setProperty(CURVE_DECAL_TYPE, "", 0, "Material", Span(&e, 1), Path(material_path));
 				const float height = (float)maximum(abs(polyline[i].y - polyline[i - 1].y), abs(polyline[i].y - polyline[i + 1].y));
 				editor.setProperty(CURVE_DECAL_TYPE, "", 0, "Half extents", Span(&e, 1), height + 4);
 				const float scale = float(length(p0 - polyline[i]) + length(p2 - polyline[i])) * 0.2f;
-				editor.setProperty(CURVE_DECAL_TYPE, "", 0, "UV scale", Span(&e, 1), Vec2(8, scale));
+				editor.setProperty(CURVE_DECAL_TYPE, "", 0, "UV scale", Span(&e, 1), Vec2(width, scale));
 
 				Transform tr;
 				tr.pos = polyline[i];
@@ -2419,6 +2429,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			}
 		}
 		editor.endCommandGroup();
+		EntityRef e = *terrain_entity;
+		editor.selectEntities(Span(&e, 1), false);
 	}
 
 	void flattenPolylines(lua_State* L) {
@@ -3061,6 +3073,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			"reservoir\0landuse",
 			"water\0natural",
 			"\0building",
+			"\0man_made",
+			"\0natural",
+			"\0leisure",
+			"\0barrier",
+			"\0tourism",
+			"\0amenity",
 			"\0highway",
 			"footway\0highway",
 			"track\0highway",
