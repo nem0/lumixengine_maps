@@ -1,4 +1,4 @@
-# Maps plugin for Lumix Engine
+# Maps plugin for [Lumix Engine](https://github.com/nem0/LumixEngine)
 
 [![Discord Chat](https://img.shields.io/discord/480318777943392266.svg)](https://discord.gg/RgFybs6) 
 [![License](http://img.shields.io/:license-mit-blue.svg)](http://doge.mit-license.org)
@@ -8,6 +8,6 @@
 
 [Getting started](https://www.youtube.com/watch?v=SaZPVgnGyKo)
 
-Maps plugin for [Lumix Engine](https://github.com/nem0/LumixEngine). You can use this plugin to easily create real-world terrains in Lumix Engine. It downloads height maps from [Amazon](https://aws.amazon.com/public-datasets/terrain/) and satellite maps from [EOX](https://maps.eox.at/). It can read [OSM](https://www.openstreetmap.org/#map=14/48.6627/17.9527) data and use them to place roads, buildings and other objects. Read their licenses to find out what can you use this data for.
+You can use this plugin to easily create real-world terrains in Lumix Engine. It downloads height maps from [Amazon](https://aws.amazon.com/public-datasets/terrain/) and satellite maps from [EOX](https://maps.eox.at/). It can read [OSM](https://www.openstreetmap.org/#map=14/48.6627/17.9527) data and use them to place roads, buildings and other objects. Read their licenses to find out what can you use this data for.
 
 You can use [itch.io](https://mikulasflorek.itch.io/lumix-engine) to download the engine with maps plugin already installed.
