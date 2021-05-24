@@ -1665,7 +1665,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			ImGui::TextUnformatted("Selected entity does not have terrain component");
 			return;
 		}
-		RenderScene* scene = (RenderScene*)universe->getScene(crc32("renderer"));
+		RenderScene* scene = (RenderScene*)universe->getScene("renderer");
 		Material* mat = scene->getTerrainMaterial(entities[0]);
 		if (!mat->isReady()) {
 			ImGui::Text("Material %s not ready", mat->getPath().c_str());
@@ -1918,7 +1918,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		if (selected_entities.size() != 1) return nullptr;
 		if (!universe->hasComponent(selected_entities[0], TERRAIN_TYPE)) return nullptr;
 
-		RenderScene* scene = (RenderScene*)universe->getScene(crc32("renderer"));
+		RenderScene* scene = (RenderScene*)universe->getScene("renderer");
 		return scene->getTerrain(selected_entities[0]);
 	}
 	
