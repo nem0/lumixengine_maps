@@ -2530,6 +2530,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	struct PrefabProbability {
 		PrefabResource* resource;
 		Vec4 distances;
+		Vec2 scale;
+		Vec2 y_offset;
 		float multiplier = 1.f;
 	};
 
@@ -2561,10 +2563,17 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				const Vec4 distances = LuaWrapper::toType<Vec4>(L, -1);
 				lua_pop(L, 1);
 
+				Vec2 scale = Vec2(1, 1);
+				LuaWrapper::getOptionalField(L, -1, "scale", &scale);
+				Vec2 y_offset = Vec2(0, 0);
+				LuaWrapper::getOptionalField(L, -1, "y_offset", &y_offset);
+
 				PrefabProbability& prob = prefabs.emplace();
 				LuaWrapper::getOptionalField(L, -1, "multiplier", &prob.multiplier);
 				prob.resource = res;
 				prob.distances = distances;
+				prob.scale = scale;
+				prob.y_offset = y_offset;
 			}
 			else {
 				lua_pop(L, 1);
@@ -2767,9 +2776,14 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 					pos.x -= size.x * 0.5f;
 					pos.y += y_base;
 					pos.z -= size.y * 0.5f;
-
+					
 					const u32 r = getRandomPrefab(distance, prefabs);
-					transforms[r].push({pos, Quat(Vec3(0, 1, 0), randFloat() * 2 * PI), 1});
+					const Vec2& yoffset_range = prefabs[r].y_offset;
+					pos.y += lerp(yoffset_range.x, yoffset_range.y, randFloat());
+
+					const Vec2& scale_range = prefabs[r].scale;
+					const float scale = lerp(scale_range.x, scale_range.y, randFloat());
+					transforms[r].push({pos, Quat(Vec3(0, 1, 0), randFloat() * 2 * PI), scale});
 				}
 			}
 		}
