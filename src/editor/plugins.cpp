@@ -1486,6 +1486,15 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 	}
 
+	void maskDistance(float from, float to) {
+		for (u32 j = 0; j < m_bitmap_size; ++j) {
+			for (u32 i = 0; i < m_bitmap_size; ++i) {
+				const float dist = m_distance_field[i + j * m_bitmap_size];
+				m_bitmap[i + j * m_bitmap_size] = dist >= from && dist <= to ? 1 : 0;
+			}
+		}
+	}
+
 	void computeDistanceField() {
 		Array<IVec2> data_ar(m_app.getAllocator());
 
@@ -1943,12 +1952,14 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			lua_setglobal(L, #F);\
 		}
 
+		REGISTER(addGrass);
 		REGISTER(adjustHeight);
 		REGISTER(clearMask);
 		REGISTER(computeDistanceField);
 		REGISTER(invertMask);
 		REGISTER(shrinkMask);
 		REGISTER(growMask);
+		REGISTER(maskDistance);
 		REGISTER(maskPolygons);
 		REGISTER(maskPolylines);
 		REGISTER(maskTexture);
@@ -2978,7 +2989,15 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		splatmap->onDataUpdated(0, 0, splatmap->width, splatmap->height);
 	}
 	
+	void addGrass(u16 grass) {
+		paintGrassInternal(grass, true);
+	}
+
 	void paintGrass(u16 grass) {
+		paintGrassInternal(grass, false);
+	}
+
+	void paintGrassInternal(u16 grass, bool additive) {
 		const Terrain* terrain = getSelectedTerrain();
 		if (!terrain) return;
 
@@ -3006,7 +3025,13 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			for (u32 x = 0; x < splatmap->width; ++x) {
 				if (is_masked(x, y)) {
 					u8* pixel = data + (x + (splatmap->height - y - 1) * splatmap->width) * 4;
-					memcpy(pixel + 2, &grass, sizeof(grass));
+					if (additive) {
+						u16* tmp = (u16*)(pixel + 2);
+						*tmp |= grass;
+					}
+					else {
+						memcpy(pixel + 2, &grass, sizeof(grass));
+					}
 				}
 			}
 		}
