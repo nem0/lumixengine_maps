@@ -19,10 +19,12 @@
 #include "engine/prefab.h"
 #include "engine/reflection.h"
 #include "engine/resource_manager.h"
+#include "engine/stack_array.h"
 #include "engine/sync.h"
 #include "engine/thread.h"
 #include "imgui/imgui.h"
 #include "renderer/material.h"
+#include "renderer/model.h"
 #include "renderer/render_scene.h"
 #include "renderer/terrain.h"
 #include "renderer/texture.h"
@@ -77,6 +79,7 @@ struct TileLoc {
 
 static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
 static const ComponentType TERRAIN_TYPE = reflection::getComponentType("terrain");
+static const ComponentType INSTANCED_MODEL_TYPE = reflection::getComponentType("instanced_model");
 static const ComponentType CURVE_DECAL_TYPE = reflection::getComponentType("curve_decal");
 
 double long2tilex(double long lon, int z) {
@@ -1968,6 +1971,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		REGISTER(unmaskPolygons);
 		REGISTER(unmaskTexture);
 		REGISTER(placeDecals);
+		REGISTER(placeInstances);
 		REGISTER(placePrefabs);
 		REGISTER(placePrefabsAtWayNodes);
 		REGISTER(placePrefabsAtNodes);
@@ -2535,6 +2539,64 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		float multiplier = 1.f;
 	};
 
+	struct ModelProbability {
+		Model* resource;
+		Vec4 distances;
+		Vec2 scale;
+		Vec2 y_offset;
+		float multiplier = 1.f;
+	};
+
+	void getModels(lua_State* L, i32 idx, const char* key, Array<ModelProbability>& prefabs) {
+		const int type = LuaWrapper::getField(L, idx, key);
+		if (type == LUA_TNIL) luaL_error(L, "missing `%s`", key);
+		if (type != LUA_TTABLE) luaL_error(L, "`%s` is not a table", key);
+		
+		WorldEditor& editor = m_app.getWorldEditor();
+		ResourceManagerHub& rm = editor.getEngine().getResourceManager();
+	
+		const i32 n = (int)lua_objlen(L, -1);
+		for (i32 i = 0; i < n; ++i) {
+			lua_rawgeti(L, -1, i + 1);
+			if(lua_istable(L, -1)) {
+				if (LuaWrapper::getField(L, -1, "model") != LUA_TSTRING) {
+					lua_pop(L, 1);
+					luaL_argerror(L, idx, "'model' is not string or is missing");
+				}
+				const char* prefab_path = LuaWrapper::toType<const char*>(L, -1);
+				Model* res = rm.load<Model>(Path(prefab_path));
+				lua_pop(L, 1);
+				lua_getfield(L, -1, "distances");
+				if (!LuaWrapper::isType<Vec4>(L, -1)) {
+					lua_pop(L, 1);
+					res->decRefCount();
+					luaL_argerror(L, idx, "'distances' is not vec4 or is missing");
+				}
+				const Vec4 distances = LuaWrapper::toType<Vec4>(L, -1);
+				lua_pop(L, 1);
+
+				Vec2 scale = Vec2(1, 1);
+				LuaWrapper::getOptionalField(L, -1, "scale", &scale);
+				Vec2 y_offset = Vec2(0, 0);
+				LuaWrapper::getOptionalField(L, -1, "y_offset", &y_offset);
+
+				ModelProbability& prob = prefabs.emplace();
+				LuaWrapper::getOptionalField(L, -1, "multiplier", &prob.multiplier);
+				prob.resource = res;
+				prob.distances = distances;
+				prob.scale = scale;
+				prob.y_offset = y_offset;
+			}
+			else {
+				lua_pop(L, 1);
+				luaL_argerror(L, idx, "table of models expected");
+			}
+			lua_pop(L, 1);
+		}
+
+		lua_pop(L, 1);
+	}
+
 	void getPrefabs(lua_State* L, i32 idx, const char* key, Array<PrefabProbability>& prefabs) {
 		const int type = LuaWrapper::getField(L, idx, key);
 		if (type == LUA_TNIL) luaL_error(L, "missing `%s`", key);
@@ -2694,10 +2756,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		editor.endCommandGroup();
 	}
 
-	static u32 getRandomPrefab(float distance, const Array<PrefabProbability>& probs) {
+	template <typename T>
+	static u32 getRandomItem(float distance, const Array<T>& probs) {
 		float sum = 0;
 
-		auto get = [](float distance, const PrefabProbability& prob){
+		auto get = [](float distance, const T& prob){
 			if (distance < prob.distances.x) return 0.f;
 			if (distance > prob.distances.w) return 0.f;
 			
@@ -2710,7 +2773,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			return prob.multiplier * (1 - (distance - prob.distances.z) / (prob.distances.w - prob.distances.z));
 		};
 
-		for (const PrefabProbability& prob : probs) {
+		for (const T& prob : probs) {
 			sum += get(distance, prob);
 		}
 		if (sum == 0) return 0;
@@ -2718,7 +2781,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		float r = randFloat() * sum;
 
 		for (i32 i = 0; i < probs.size(); ++i) {
-			const PrefabProbability& prob = probs[i];
+			const T& prob = probs[i];
 			float p = get(distance, prob);
 			if (r < p) return i;
 			r -= p;
@@ -2726,6 +2789,95 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		
 		ASSERT(false);
 		return 0;
+	}
+
+	void placeInstances(lua_State* L) {
+		float spacing;
+		if (!LuaWrapper::checkField(L, 1, "spacing", &spacing)) {
+			luaL_error(L, "missing `spacing`");
+		}
+
+		if (m_distance_field.empty()) luaL_error(L, "no distance field");
+		ASSERT(m_distance_field.size() == m_bitmap_size * m_bitmap_size);
+
+		const EntityPtr terrain = getTerrain();
+		if (!terrain.isValid()) {
+			luaL_error(L, "no terrain is selected");
+		}
+
+		Array<ModelProbability> models(m_app.getAllocator());
+		getModels(L, 1, "models", models);
+		if (models.empty()) return;
+
+		WorldEditor& editor = m_app.getWorldEditor();
+		Universe* universe = editor.getUniverse();
+		RenderScene* render_scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
+		const DVec3 terrain_pos = universe->getPosition((EntityRef)terrain);
+
+		struct Group {
+			EntityRef e;
+			InstancedModel* im;
+		};
+
+		StackArray<Group, 64> groups(m_app.getAllocator());
+		editor.beginCommandGroup("maps_place_instances");
+		for (const ModelProbability& m : models) {
+			const EntityRef e = editor.addEntity();
+			groups.emplace().e = e;
+			editor.makeParent(terrain, e);
+			editor.addComponent(Span(&e, 1), INSTANCED_MODEL_TYPE);
+			editor.setProperty(INSTANCED_MODEL_TYPE, "", 0, "Model", Span(&e, 1), m.resource->getPath());
+			editor.setEntitiesPositions(&e, &terrain_pos, 1);
+		}
+
+		for (Group& g : groups) {
+			g.im = &render_scene->beginInstancedModelEditing(g.e);
+		}
+
+		const double y_base = terrain_pos.y;
+		const Vec2 size = render_scene->getTerrainSize((EntityRef)terrain);
+
+		for (float y = 0; y < m_bitmap_size; y += spacing) {
+			for (float x = 0; x < m_bitmap_size; x += spacing) {
+				const i32 idx = i32(x) + i32(y) * m_bitmap_size;
+				const float distance = m_distance_field[idx];
+				if (distance > 0.01f && m_bitmap[idx]) {
+					float fx = (x + spacing * randFloat() * 0.9f - spacing * 0.45f);
+					float fy = (y + spacing * randFloat() * 0.9f - spacing * 0.45f);
+					fx = clamp(fx, 0.f, (float)m_bitmap_size - 1);
+					fy = clamp(fy, 0.f, (float)m_bitmap_size - 1);
+
+					DVec3 pos;
+					pos.x = (fx / (float)m_bitmap_size) * size.x;
+					pos.z = (1 - fy / (float)m_bitmap_size) * size.y;
+					pos.y = render_scene->getTerrainHeightAt((EntityRef)terrain, (float)pos.x, (float)pos.z);
+
+					pos.x -= size.x * 0.5f;
+					pos.y += y_base;
+					pos.z -= size.y * 0.5f;
+					
+					const u32 r = getRandomItem(distance, models);
+					const Vec2& yoffset_range = models[r].y_offset;
+					pos.y += lerp(yoffset_range.x, yoffset_range.y, randFloat());
+
+					const Vec2& scale_range = models[r].scale;
+					const float scale = lerp(scale_range.x, scale_range.y, randFloat());
+					
+					InstancedModel::InstanceData& id = groups[r].im->instances.emplace();
+					const Quat rot(Vec3(0, 1, 0), randFloat() * 2 * PI);
+					id.pos = Vec3(pos - terrain_pos);
+					id.scale = scale;
+					id.rot_quat = rot.w < 0 ? -Vec3(rot.x, rot.y, rot.z) : Vec3(rot.x, rot.y, rot.z);
+					id.lod = 3;
+				}
+			}
+		}
+
+		for (Group& g : groups) {
+			render_scene->endInstancedModelEditing(g.e);
+		}
+
+		editor.endCommandGroup();
 	}
 
 	void placePrefabs(lua_State* L) {
@@ -2777,7 +2929,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 					pos.y += y_base;
 					pos.z -= size.y * 0.5f;
 					
-					const u32 r = getRandomPrefab(distance, prefabs);
+					const u32 r = getRandomItem(distance, prefabs);
 					const Vec2& yoffset_range = prefabs[r].y_offset;
 					pos.y += lerp(yoffset_range.x, yoffset_range.y, randFloat());
 
