@@ -23,6 +23,7 @@
 #include "engine/sync.h"
 #include "engine/thread.h"
 #include "imgui/imgui.h"
+#include "renderer/editor/terrain_editor.h"
 #include "renderer/material.h"
 #include "renderer/model.h"
 #include "renderer/render_scene.h"
@@ -743,8 +744,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 {
 	struct MapsTask;
 
-	struct TileData 
-	{
+	struct TileData {
 		TileData(int x, int y, int zoom, IAllocator& allocator) 
 			: imagery_data(allocator)
 			, hm_data(allocator)
@@ -969,7 +969,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		, m_osm_tris(app.getAllocator())
 		, m_bitmap(app.getAllocator())
 		, m_tmp_bitmap(app.getAllocator())
-		, m_distance_field(app.getAllocator())
 	{
 		#ifdef _WIN32
 			WORD sockVer;
@@ -1489,21 +1488,63 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 	}
 
-	void maskDistance(float from, float to) {
+	TerrainEditor* getTerrainEditor() {
+		for (StudioApp::MousePlugin* p : m_app.getMousePlugins()) {
+			if (equalStrings(p->getName(), "terrain_editor")) {
+				return static_cast<TerrainEditor*>(p);
+			}
+		}
+		return nullptr;
+	}
+	
+	void maskDistance(lua_State* L, const char* distance_field, float from, float to) {
+		TerrainEditor* terrain_editor = getTerrainEditor();
+		if (!terrain_editor) {
+			luaL_error(L, "Terrain editor missing");
+			return;
+		}
+
+		DistanceField* df = terrain_editor->findDistanceField(distance_field);
+		if (!df) {
+			luaL_error(L, "Distance field `%s` not found", distance_field);
+			return;
+		}
+			 
+		if (df->width != m_bitmap_size || df->height != m_bitmap_size) {
+			luaL_error(L, "Size of distance field must match size of mask");
+			return;
+		}
+
 		for (u32 j = 0; j < m_bitmap_size; ++j) {
 			for (u32 i = 0; i < m_bitmap_size; ++i) {
-				const float dist = m_distance_field[i + j * m_bitmap_size];
+				const float dist = df->data[i + j * m_bitmap_size];
 				m_bitmap[i + j * m_bitmap_size] = dist >= from && dist <= to ? 1 : 0;
 			}
 		}
 	}
 
-	void computeDistanceField() {
+	void computeDistanceField(lua_State* L, const char* distance_field) {
+		TerrainEditor* terrain_editor = getTerrainEditor();
+		if (!terrain_editor) {
+			luaL_error(L, "Terrain editor missing");
+			return;
+		}
+
+		DistanceField* df = terrain_editor->findDistanceField(distance_field);
+		if (!df) {
+			luaL_error(L, "Distance field `%s` not found", distance_field);
+			return;
+		}
+			 
+		if (df->width != m_bitmap_size || df->height != m_bitmap_size) {
+			luaL_error(L, "Size of distance field must match size of mask");
+			return;
+		}
+
 		Array<IVec2> data_ar(m_app.getAllocator());
 
 		data_ar.resize(m_bitmap_size * m_bitmap_size);
 		IVec2* data = data_ar.begin();
-		m_distance_field.resize(m_bitmap_size * m_bitmap_size);
 		const u32 w = m_bitmap_size;
 		const u32 h = m_bitmap_size;
 
@@ -1576,7 +1617,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		for (u32 j = 0; j < h; ++j) {
 			for (u32 i = 0; i < w; ++i) {
 				const float d = length(Vec2(data[i + j * w] - IVec2(i, j)));
-				m_distance_field[i + j * w] = d;
+				df->data[i + (h - j - 1) * w] = d;
 			}
 		}
 	}
@@ -1945,7 +1986,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	void execute(const char* src) {
 		m_app.getSettings().setValue(Settings::LOCAL, "maps_script", src);
-		lua_State* L = luaL_newstate();
+		lua_State* L = m_app.getEngine().getState();
 
 		#define REGISTER(F) \
 		{\
@@ -1971,8 +2012,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		REGISTER(unmaskPolygons);
 		REGISTER(unmaskTexture);
 		REGISTER(placeDecals);
-		REGISTER(placeInstances);
-		REGISTER(placePrefabs);
 		REGISTER(placePrefabsAtWayNodes);
 		REGISTER(placePrefabsAtNodes);
 		REGISTER(paintGrass);
@@ -1980,7 +2019,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		REGISTER(flattenPolylines);
 
 		LuaWrapper::execute(L, Span(src, src + stringLength(src)), "maps", 0);
-		lua_close(L);
 		m_app.getSettings().save();
 	}
 
@@ -2066,7 +2104,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	void invertMask() {
 		for (u8& v : m_bitmap) {
-			v = ~v;
+			v = v == 0;
 		}
 	}
 
@@ -2531,122 +2569,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		lua_pop(L, 1);
 	}
 
-	struct PrefabProbability {
-		PrefabResource* resource;
-		Vec4 distances;
-		Vec2 scale;
-		Vec2 y_offset;
-		float multiplier = 1.f;
-	};
-
-	struct ModelProbability {
-		Model* resource;
-		Vec4 distances;
-		Vec2 scale;
-		Vec2 y_offset;
-		float multiplier = 1.f;
-	};
-
-	void getModels(lua_State* L, i32 idx, const char* key, Array<ModelProbability>& prefabs) {
-		const int type = LuaWrapper::getField(L, idx, key);
-		if (type == LUA_TNIL) luaL_error(L, "missing `%s`", key);
-		if (type != LUA_TTABLE) luaL_error(L, "`%s` is not a table", key);
-		
-		WorldEditor& editor = m_app.getWorldEditor();
-		ResourceManagerHub& rm = editor.getEngine().getResourceManager();
-	
-		const i32 n = (int)lua_objlen(L, -1);
-		for (i32 i = 0; i < n; ++i) {
-			lua_rawgeti(L, -1, i + 1);
-			if(lua_istable(L, -1)) {
-				if (LuaWrapper::getField(L, -1, "model") != LUA_TSTRING) {
-					lua_pop(L, 1);
-					luaL_argerror(L, idx, "'model' is not string or is missing");
-				}
-				const char* prefab_path = LuaWrapper::toType<const char*>(L, -1);
-				Model* res = rm.load<Model>(Path(prefab_path));
-				lua_pop(L, 1);
-				lua_getfield(L, -1, "distances");
-				if (!LuaWrapper::isType<Vec4>(L, -1)) {
-					lua_pop(L, 1);
-					res->decRefCount();
-					luaL_argerror(L, idx, "'distances' is not vec4 or is missing");
-				}
-				const Vec4 distances = LuaWrapper::toType<Vec4>(L, -1);
-				lua_pop(L, 1);
-
-				Vec2 scale = Vec2(1, 1);
-				LuaWrapper::getOptionalField(L, -1, "scale", &scale);
-				Vec2 y_offset = Vec2(0, 0);
-				LuaWrapper::getOptionalField(L, -1, "y_offset", &y_offset);
-
-				ModelProbability& prob = prefabs.emplace();
-				LuaWrapper::getOptionalField(L, -1, "multiplier", &prob.multiplier);
-				prob.resource = res;
-				prob.distances = distances;
-				prob.scale = scale;
-				prob.y_offset = y_offset;
-			}
-			else {
-				lua_pop(L, 1);
-				luaL_argerror(L, idx, "table of models expected");
-			}
-			lua_pop(L, 1);
-		}
-
-		lua_pop(L, 1);
-	}
-
-	void getPrefabs(lua_State* L, i32 idx, const char* key, Array<PrefabProbability>& prefabs) {
-		const int type = LuaWrapper::getField(L, idx, key);
-		if (type == LUA_TNIL) luaL_error(L, "missing `%s`", key);
-		if (type != LUA_TTABLE) luaL_error(L, "`%s` is not a table", key);
-		
-		WorldEditor& editor = m_app.getWorldEditor();
-		ResourceManagerHub& rm = editor.getEngine().getResourceManager();
-	
-		const i32 n = (int)lua_objlen(L, -1);
-		for (i32 i = 0; i < n; ++i) {
-			lua_rawgeti(L, -1, i + 1);
-			if(lua_istable(L, -1)) {
-				if (LuaWrapper::getField(L, -1, "prefab") != LUA_TSTRING) {
-					lua_pop(L, 1);
-					luaL_argerror(L, idx, "'prefab' is not string or is missing");
-				}
-				const char* prefab_path = LuaWrapper::toType<const char*>(L, -1);
-				PrefabResource* res = rm.load<PrefabResource>(Path(prefab_path));
-				lua_pop(L, 1);
-				lua_getfield(L, -1, "distances");
-				if (!LuaWrapper::isType<Vec4>(L, -1)) {
-					lua_pop(L, 1);
-					res->decRefCount();
-					luaL_argerror(L, idx, "'distances' is not vec4 or is missing");
-				}
-				const Vec4 distances = LuaWrapper::toType<Vec4>(L, -1);
-				lua_pop(L, 1);
-
-				Vec2 scale = Vec2(1, 1);
-				LuaWrapper::getOptionalField(L, -1, "scale", &scale);
-				Vec2 y_offset = Vec2(0, 0);
-				LuaWrapper::getOptionalField(L, -1, "y_offset", &y_offset);
-
-				PrefabProbability& prob = prefabs.emplace();
-				LuaWrapper::getOptionalField(L, -1, "multiplier", &prob.multiplier);
-				prob.resource = res;
-				prob.distances = distances;
-				prob.scale = scale;
-				prob.y_offset = y_offset;
-			}
-			else {
-				lua_pop(L, 1);
-				luaL_argerror(L, idx, "table of prefabs expected");
-			}
-			lua_pop(L, 1);
-		}
-
-		lua_pop(L, 1);
-	}
-
 	void placePrefabsAtWayNodes(lua_State* L) {
 		const WayDef def(L);
 
@@ -2789,169 +2711,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		
 		ASSERT(false);
 		return 0;
-	}
-
-	void placeInstances(lua_State* L) {
-		float spacing;
-		if (!LuaWrapper::checkField(L, 1, "spacing", &spacing)) {
-			luaL_error(L, "missing `spacing`");
-		}
-
-		if (m_distance_field.empty()) luaL_error(L, "no distance field");
-		ASSERT(m_distance_field.size() == m_bitmap_size * m_bitmap_size);
-
-		const EntityPtr terrain = getTerrain();
-		if (!terrain.isValid()) {
-			luaL_error(L, "no terrain is selected");
-		}
-
-		Array<ModelProbability> models(m_app.getAllocator());
-		getModels(L, 1, "models", models);
-		if (models.empty()) return;
-
-		WorldEditor& editor = m_app.getWorldEditor();
-		Universe* universe = editor.getUniverse();
-		RenderScene* render_scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
-		const DVec3 terrain_pos = universe->getPosition((EntityRef)terrain);
-
-		struct Group {
-			EntityRef e;
-			InstancedModel* im;
-		};
-
-		StackArray<Group, 64> groups(m_app.getAllocator());
-		editor.beginCommandGroup("maps_place_instances");
-		for (const ModelProbability& m : models) {
-			const EntityRef e = editor.addEntity();
-			groups.emplace().e = e;
-			editor.makeParent(terrain, e);
-			editor.addComponent(Span(&e, 1), INSTANCED_MODEL_TYPE);
-			editor.setProperty(INSTANCED_MODEL_TYPE, "", 0, "Model", Span(&e, 1), m.resource->getPath());
-			editor.setEntitiesPositions(&e, &terrain_pos, 1);
-		}
-
-		for (Group& g : groups) {
-			g.im = &render_scene->beginInstancedModelEditing(g.e);
-		}
-
-		const double y_base = terrain_pos.y;
-		const Vec2 size = render_scene->getTerrainSize((EntityRef)terrain);
-
-		for (float y = 0; y < m_bitmap_size; y += spacing) {
-			for (float x = 0; x < m_bitmap_size; x += spacing) {
-				const i32 idx = i32(x) + i32(y) * m_bitmap_size;
-				const float distance = m_distance_field[idx];
-				if (distance > 0.01f && m_bitmap[idx]) {
-					float fx = (x + spacing * randFloat() * 0.9f - spacing * 0.45f);
-					float fy = (y + spacing * randFloat() * 0.9f - spacing * 0.45f);
-					fx = clamp(fx, 0.f, (float)m_bitmap_size - 1);
-					fy = clamp(fy, 0.f, (float)m_bitmap_size - 1);
-
-					DVec3 pos;
-					pos.x = (fx / (float)m_bitmap_size) * size.x;
-					pos.z = (1 - fy / (float)m_bitmap_size) * size.y;
-					pos.y = render_scene->getTerrainHeightAt((EntityRef)terrain, (float)pos.x, (float)pos.z);
-
-					pos.x -= size.x * 0.5f;
-					pos.y += y_base;
-					pos.z -= size.y * 0.5f;
-					
-					const u32 r = getRandomItem(distance, models);
-					const Vec2& yoffset_range = models[r].y_offset;
-					pos.y += lerp(yoffset_range.x, yoffset_range.y, randFloat());
-
-					const Vec2& scale_range = models[r].scale;
-					const float scale = lerp(scale_range.x, scale_range.y, randFloat());
-					
-					InstancedModel::InstanceData& id = groups[r].im->instances.emplace();
-					const Quat rot(Vec3(0, 1, 0), randFloat() * 2 * PI);
-					id.pos = Vec3(pos - terrain_pos);
-					id.scale = scale;
-					id.rot_quat = rot.w < 0 ? -Vec3(rot.x, rot.y, rot.z) : Vec3(rot.x, rot.y, rot.z);
-					id.lod = 3;
-				}
-			}
-		}
-
-		for (Group& g : groups) {
-			render_scene->endInstancedModelEditing(g.e);
-		}
-
-		editor.endCommandGroup();
-	}
-
-	void placePrefabs(lua_State* L) {
-		float spacing;
-		if (!LuaWrapper::checkField(L, 1, "spacing", &spacing)) {
-			luaL_error(L, "missing `spacing`");
-		}
-
-		if (m_distance_field.empty()) luaL_error(L, "no distance field");
-		ASSERT(m_distance_field.size() == m_bitmap_size * m_bitmap_size);
-
-		const EntityPtr terrain = getTerrain();
-		if (!terrain.isValid()) {
-			luaL_error(L, "no terrain is selected");
-		}
-
-		Array<PrefabProbability> prefabs(m_app.getAllocator());
-		getPrefabs(L, 1, "prefabs", prefabs);
-		if (prefabs.empty()) return;
-
-		WorldEditor& editor = m_app.getWorldEditor();
-		Universe* universe = editor.getUniverse();
-		RenderScene* render_scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
-		Array<Array<Transform>> transforms(m_app.getAllocator());
-		const i32 prefabs_count = prefabs.size();
-		for (const auto& prefab : prefabs) {
-			transforms.emplace(m_app.getAllocator());
-		}
-
-		const double y_base = universe->getPosition((EntityRef)terrain).y;
-		const Vec2 size = render_scene->getTerrainSize((EntityRef)terrain);
-
-		for (float y = 0; y < m_bitmap_size; y += spacing) {
-			for (float x = 0; x < m_bitmap_size; x += spacing) {
-				const i32 idx = i32(x) + i32(y) * m_bitmap_size;
-				const float distance = m_distance_field[idx];
-				if (distance > 0.01f && m_bitmap[idx]) {
-					float fx = (x + spacing * randFloat() * 0.9f - spacing * 0.45f);
-					float fy = (y + spacing * randFloat() * 0.9f - spacing * 0.45f);
-					fx = clamp(fx, 0.f, (float)m_bitmap_size - 1);
-					fy = clamp(fy, 0.f, (float)m_bitmap_size - 1);
-
-					DVec3 pos;
-					pos.x = (fx / (float)m_bitmap_size) * size.x;
-					pos.z = (1 - fy / (float)m_bitmap_size) * size.y;
-					pos.y = render_scene->getTerrainHeightAt((EntityRef)terrain, (float)pos.x, (float)pos.z);
-
-					pos.x -= size.x * 0.5f;
-					pos.y += y_base;
-					pos.z -= size.y * 0.5f;
-					
-					const u32 r = getRandomItem(distance, prefabs);
-					const Vec2& yoffset_range = prefabs[r].y_offset;
-					pos.y += lerp(yoffset_range.x, yoffset_range.y, randFloat());
-
-					const Vec2& scale_range = prefabs[r].scale;
-					const float scale = lerp(scale_range.x, scale_range.y, randFloat());
-					transforms[r].push({pos, Quat(Vec3(0, 1, 0), randFloat() * 2 * PI), scale});
-				}
-			}
-		}
-
-		FileSystem& fs = editor.getEngine().getFileSystem();
-		while (fs.hasWork()) {
-			os::sleep(10);
-			fs.processCallbacks();
-		}
-
-		editor.beginCommandGroup("maps_place_prefabs");
-		for (u32 i = 0; i < (u32)prefabs.size(); ++i) {
-			if (!transforms[i].empty()) editor.getPrefabSystem().instantiatePrefabs(*prefabs[i].resource, transforms[i]);
-			prefabs[i].resource->decRefCount();
-		}
-		editor.endCommandGroup();
 	}
 
 	static float sampleMask(const u8* mask, Vec2 uv, IVec2 size) {
@@ -3449,7 +3208,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	)#";
 	Array<u8> m_tmp_bitmap;
 	Array<u8> m_bitmap;
-	Array<float> m_distance_field;
 	u32 m_bitmap_size;
 	Array<TileData*> m_tiles;
 	Array<TileData*> m_cache;
