@@ -7,7 +7,6 @@
 #include "editor/world_editor.h"
 #include "editor/settings.h"
 #include "engine/atomic.h"
-#include "engine/crc32.h"
 #include "engine/engine.h"
 #include "engine/geometry.h"
 #include "engine/hash_map.h"
