@@ -2,11 +2,13 @@
 #include "editor/asset_browser.h"
 #include "editor/prefab_system.h"
 #include "editor/render_interface.h"
+#include "editor/spline_editor.h"
 #include "editor/studio_app.h"
 #include "editor/utils.h"
 #include "editor/world_editor.h"
 #include "editor/settings.h"
 #include "engine/atomic.h"
+#include "engine/core.h"
 #include "engine/engine.h"
 #include "engine/geometry.h"
 #include "engine/hash_map.h"
@@ -77,6 +79,8 @@ struct TileLoc {
 	int x, y, z;
 };
 
+static const ComponentType SPLINE_GEOMETRY_TYPE = reflection::getComponentType("spline_geometry");
+static const ComponentType SPLINE_TYPE = reflection::getComponentType("spline");
 static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
 static const ComponentType TERRAIN_TYPE = reflection::getComponentType("terrain");
 static const ComponentType INSTANCED_MODEL_TYPE = reflection::getComponentType("instanced_model");
@@ -2013,6 +2017,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		REGISTER(placeDecals);
 		REGISTER(placePrefabsAtWayNodes);
 		REGISTER(placePrefabsAtNodes);
+		REGISTER(placeSplines);
 		REGISTER(paintGrass);
 		REGISTER(paintGround);
 		REGISTER(flattenPolylines);
@@ -2392,6 +2397,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	void flattenLine(const DVec3& prev, const DVec3& a, const DVec3& b, const DVec3& next, const Terrain& terrain, float line_width, float boundary_width) {
 		ASSERT(terrain.m_heightmap->format == gpu::TextureFormat::R16);
+		ASSERT(m_bitmap_size != 0);
 		
 		const float base_y = (float)m_app.getWorldEditor().getUniverse()->getPosition(terrain.m_entity).y;
 
@@ -2425,6 +2431,61 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		flattenQuad(points, (float)a.y - base_y, (float)b.y - base_y, terrain, line_width * s, boundary_width * s);
 	}
 	
+	void placeSplines(lua_State* L) {
+		const WayDef def(L);
+		TerrainEditor* terrain_editor = static_cast<TerrainEditor*>(m_app.getMousePlugin("terrain_editor"));
+		
+		char material_path[LUMIX_MAX_PATH];
+		const bool add_geometry = LuaWrapper::checkStringField(L, 1, "material", Span(material_path));
+		char distance_field_name[64];
+		float width = 1;
+		LuaWrapper::getOptionalField(L, 1, "width", &width);
+		const bool add_to_df = LuaWrapper::checkStringField(L, 1, "distance_field", Span(distance_field_name));
+		DistanceField* df = add_to_df ? terrain_editor->findDistanceField(distance_field_name) : nullptr;	
+
+		Array<DVec3> polyline(m_app.getAllocator());
+		const EntityPtr terrain_entity = getTerrain();
+		if (!terrain_entity.isValid()) luaL_error(L, "no terrain is selected");
+		const Terrain* terrain = getSelectedTerrain();
+		if (!terrain->m_heightmap) luaL_error(L, "heightmap missing");
+		if (!terrain->m_heightmap->isReady()) luaL_error(L, "heightmap is not ready");
+
+		WorldEditor& editor = m_app.getWorldEditor();
+		CoreScene* core_scene = (CoreScene*)editor.getUniverse()->getScene(SPLINE_TYPE);
+		editor.beginCommandGroup("place_decals");
+		SplineEditor* spline_editor = static_cast<SplineEditor*>(m_app.getIPlugin("spline_editor"));
+		Array<Vec3> points(m_app.getAllocator());
+		for (pugi::xml_node& w : m_osm_parser.m_ways) {
+			if (!OSMParser::hasTag(w, def.key, def.value)) continue;
+
+			polyline.clear();
+			m_osm_parser.getWay(w, (EntityRef)terrain_entity, polyline);
+			if (polyline.size() < 3) continue;
+
+			const EntityRef entity = editor.addEntityAt(polyline[0]);
+			editor.addComponent(Span(&entity, 1), SPLINE_TYPE);
+			if (add_geometry) {
+				editor.addComponent(Span(&entity, 1), SPLINE_GEOMETRY_TYPE);
+				editor.setProperty(SPLINE_GEOMETRY_TYPE, "", -1, "Material", Span(&entity, 1), Path(material_path));
+				editor.setProperty(SPLINE_GEOMETRY_TYPE, "", -1, "Width", Span(&entity, 1), width);
+			}
+
+			points.clear();
+			for (const DVec3& p : polyline) {
+				points.push(Vec3(p - polyline[0]));
+			}
+
+			spline_editor->setSplinePoints(entity, points);
+			if (df) {
+				const Spline& spline = core_scene->getSpline(entity);
+				terrain_editor->addSpline(*terrain, *df, spline, entity);
+			}
+		}
+		editor.endCommandGroup();
+		EntityRef e = *terrain_entity;
+		editor.selectEntities(Span(&e, 1), false);
+	}
+
 	void placeDecals(lua_State* L) {
 		const WayDef def(L);
 		
@@ -3207,7 +3268,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	)#";
 	Array<u8> m_tmp_bitmap;
 	Array<u8> m_bitmap;
-	u32 m_bitmap_size;
+	u32 m_bitmap_size = 0;
 	Array<TileData*> m_tiles;
 	Array<TileData*> m_cache;
 	Array<MapsTask*> m_queue;
