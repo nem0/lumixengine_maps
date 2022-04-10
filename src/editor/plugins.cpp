@@ -2463,6 +2463,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			if (polyline.size() < 3) continue;
 
 			const EntityRef entity = editor.addEntityAt(polyline[0]);
+			editor.makeParent(terrain_entity, entity);
 			editor.addComponent(Span(&entity, 1), SPLINE_TYPE);
 			if (add_geometry) {
 				editor.addComponent(Span(&entity, 1), SPLINE_GEOMETRY_TYPE);
@@ -2519,6 +2520,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				dir.y = 0;
 				dir = normalize(dir);
 				const EntityRef e = editor.addEntityAt(polyline[i]);
+				editor.makeParent(terrain_entity, e);
 				DVec3 p0 = i == 1 ? polyline[i - 1] : (polyline[i - 1] + polyline[i]) * 0.5;
 				DVec3 p2 = i == polyline.size() - 2 ? polyline[i + 1] : (polyline[i + 1] + polyline[i]) * 0.5;
 				const Quat rot = Quat::vec3ToVec3(dir, Vec3(1, 0, 0)).conjugated();
@@ -3259,7 +3261,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	bool m_show_hm = false;
 	StudioApp& m_app;
-	char m_script[8192] = R"#(
+	char m_script[32*1024] = R"#(
 		clearMask(1024)
 		maskPolygons { key = "landuse", inverted = true }
 		unmaskPolylines { key = "highway" }
