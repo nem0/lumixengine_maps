@@ -1411,16 +1411,16 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			else {
 				file << R"#(
 					layer {
-						red = { "/textures/common/red.tga", 0 },
-						green = { "/textures/common/red.tga", 1 },
-						blue = { "/textures/common/red.tga", 2 },
-						alpha = { "/textures/common/red.tga", 3 }
+						red = { path = "/textures/common/red.tga", channel = 0 },
+						green = { path = "/textures/common/red.tga", channel = 1 },
+						blue = { path = "/textures/common/red.tga", channel = 2 },
+						alpha = { path = "/textures/common/red.tga", channel = 3 }
 					}
 					layer {
-						red = { "/textures/common/green.tga", 0 },
-						green = { "/textures/common/green.tga", 1 },
-						blue = { "/textures/common/green.tga", 2 },
-						alpha = { "/textures/common/green.tga", 3 }
+						red = { path = "/textures/common/green.tga", channel = 0 },
+						green = { path = "/textures/common/green.tga", channel = 1 },
+						blue = { path = "/textures/common/green.tga", channel = 2 },
+						alpha = { path = "/textures/common/green.tga", channel = 3 }
 					}
 				)#";
 				file.close();
@@ -1434,16 +1434,16 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			else {
 				file << R"#(
 					layer {
-						red = { "/textures/common/default_normal.tga", 0 },
-						green = { "/textures/common/default_normal.tga", 1 },
-						blue = { "/textures/common/default_normal.tga", 2 },
-						alpha = { "/textures/common/default_normal.tga", 3 }
+						red = { path = "/textures/common/default_normal.tga", channel = 0 },
+						green = { path = "/textures/common/default_normal.tga", channel = 1 },
+						blue = { path = "/textures/common/default_normal.tga", channel = 2 },
+						alpha = { path = "/textures/common/default_normal.tga", channel = 3 }
 					}
 					layer {
-						red = { "/textures/common/default_normal.tga", 0 },
-						green = { "/textures/common/default_normal.tga", 1 },
-						blue = { "/textures/common/default_normal.tga", 2 },
-						alpha = { "/textures/common/default_normal.tga", 3 }
+						red = { path = "/textures/common/default_normal.tga", channel = 0 },
+						green = { path = "/textures/common/default_normal.tga", channel = 1 },
+						blue = { path = "/textures/common/default_normal.tga", channel = 2 },
+						alpha = { path = "/textures/common/default_normal.tga", channel = 3 }
 					}
 				)#";
 				file.close();
