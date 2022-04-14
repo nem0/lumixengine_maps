@@ -1243,8 +1243,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		StaticString<LUMIX_MAX_PATH> mat_path(file_info.m_dir, "/", file_info.m_basename, ".mat");
 		char rel_mat_path[LUMIX_MAX_PATH];
 		
-		if (!editor.getEngine().getFileSystem().makeRelative(Span(rel_mat_path), mat_path)) {
-			logError("Can not load ", mat_path, " because it's not in root directory.");
+		FileSystem& fs = editor.getEngine().getFileSystem();
+		if (!fs.makeRelative(Span(rel_mat_path), mat_path)) {
+			logError("Can not load ", mat_path, " because it's not in root directory (", fs.getBasePath(), ").");
 		}
 		editor.setProperty(TERRAIN_TYPE, "", -1, "Material", Span(&e, 1), Path(rel_mat_path));
 
