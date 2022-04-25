@@ -1522,7 +1522,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		for (u32 j = 0; j < m_bitmap_size; ++j) {
 			for (u32 i = 0; i < m_bitmap_size; ++i) {
 				const float dist = df->data[i + j * m_bitmap_size];
-				m_bitmap[i + j * m_bitmap_size] = dist >= from && dist <= to ? 1 : 0;
+				m_bitmap[i + (m_bitmap_size - j - 1) * m_bitmap_size] = dist >= from && dist <= to ? 1 : 0;
 			}
 		}
 	}
