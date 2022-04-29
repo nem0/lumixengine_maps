@@ -1326,8 +1326,10 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		for_each([&](i32 x, i32 y, const RGBA rgba){
 			const u32 p = u32((rgba.r << 16) + (rgba.g << 8) + rgba.b);
-			if (max < p) max = p;
-			if (min > p) min = p;
+			if (p != 0xffFFff) {
+				if (max < p) max = p;
+				if (min > p) min = p;
+			}
 		});
 
 		m_last_saved_hm_range.x = toFloatHeight(min);
@@ -1967,7 +1969,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 	}
 
-	const Terrain* getSelectedTerrain() const {
+	Terrain* getSelectedTerrain() const {
 		WorldEditor& editor = m_app.getWorldEditor();
 		Universe* universe = m_app.getWorldEditor().getUniverse();
 		const Array<EntityRef>& selected_entities = editor.getSelectedEntities();
@@ -2830,13 +2832,17 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	void maskTexture(const char* texture, float ref, float mask_scale) {
 		u32 mask_w, mask_h;
 		stbi_uc* mask = loadTexture(texture, mask_w, mask_h);
-		if (!mask) return;
+		if (!mask) {
+			logError("Failed to load ", texture);
+			return;
+		}
 
 		u8* out = m_bitmap.begin();
+		const Vec2 rand_offset(randFloat(0, float(mask_w)), randFloat(0, float(mask_h)));
 		for (u32 j = 0; j < m_bitmap_size; ++j) {
 			for (u32 i = 0; i < m_bitmap_size; ++i) {
-				const float k = fmodf(i * mask_scale, (float)mask_w);
-				const float l = fmodf(j * mask_scale, (float)mask_h);
+				const float k = fmodf(rand_offset.x + i * mask_scale, (float)mask_w);
+				const float l = fmodf(rand_offset.y + j * mask_scale, (float)mask_h);
 				u8& m = out[i + j * m_bitmap_size]; 
 				m = sampleMask(mask, Vec2(k, l), IVec2(mask_w, mask_h)) > ref ? 0xff : m;
 			}
@@ -2986,7 +2992,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	}
 
 	void paintGrassInternal(u16 grass, bool additive) {
-		const Terrain* terrain = getSelectedTerrain();
+		Terrain* terrain = getSelectedTerrain();
 		if (!terrain) return;
 
 		Texture* splatmap = terrain->getSplatmap();
@@ -3024,6 +3030,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			}
 		}
 		splatmap->onDataUpdated(0, 0, splatmap->width, splatmap->height);
+		terrain->setGrassDirty();
 	}
 
 	void OSMGUI() {
