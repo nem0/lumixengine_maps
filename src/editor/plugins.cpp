@@ -1258,17 +1258,22 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		Array<u16> tmp(m_app.getAllocator());
 		const i32 stride = map_size * scale;
 		tmp.resize(map_size * map_size * scale * scale);
-		for (i32 j = 0; j < (map_size - 1) * scale; ++j) {
-			for (i32 i = 0; i < (map_size - 1) * scale; ++i) {
-				const i32 m = i / scale;
-				const i32 n = j / scale;
-				const u16 h00 = raw[m + n * map_size];
-				const u16 h10 = raw[m + 1 + n * map_size];
-				const u16 h01 = raw[m + (n + 1) * map_size];
-				const u16 h11 = raw[m + 1 + (n + 1) * map_size];
+		for (i32 j = 0; j < map_size * scale; ++j) {
+			for (i32 i = 0; i < map_size * scale; ++i) {
+				const double u = i / double(map_size * scale - 1) * (map_size - 1);
+				const double v = j / double(map_size * scale - 1) * (map_size - 1);
 
-				const float tx = (i - m * scale) / (float)scale;
-				const float ty = (j - n * scale) / (float)scale;
+				const i32 m = i32(u);
+				const i32 n = i32(v);
+				const i32 ma = minimum(m + 1, map_size - 1);
+				const i32 na = minimum(n + 1, map_size - 1);
+				const float tx = float(u - m);
+				const float ty = float(v - n);
+
+				const u16 h00 = raw[m + n * map_size];
+				const u16 h10 = raw[ma + n * map_size];
+				const u16 h01 = raw[m + na * map_size];
+				const u16 h11 = raw[ma + na * map_size];
 
 				const float h = lerp(
 					lerp((float)h00, (float)h10, tx),
