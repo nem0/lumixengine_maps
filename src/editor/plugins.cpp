@@ -1579,56 +1579,82 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			}
 		}
 
-		for (i32 j = 0; j < (i32)h; ++j) {
-			const int j0 = maximum(j - 1, 0);
-			for (i32 i = 0; i < (i32)w; ++i) {
-				const int i0 = maximum(i - 1, 0);
-				const int i1 = minimum(i + 1, w - 1);
+		auto compute = [&](){
+			for (i32 j = 0; j < (i32)h; ++j) {
+				const int j0 = maximum(j - 1, 0);
+				for (i32 i = 0; i < (i32)w; ++i) {
+					const int i0 = maximum(i - 1, 0);
+					const int i1 = minimum(i + 1, w - 1);
 
-				IVec2* n = &data[i + j * w];
-				IVec2 ij(i, j);
-				check_neighbour(data[i0 + j0 * w], n, ij);
-				check_neighbour(data[i + j0 * w], n, ij);
-				check_neighbour(data[i1 + j0 * w], n, ij);
-				check_neighbour(data[i0 + j * w], n, ij);
+					IVec2* n = &data[i + j * w];
+					IVec2 ij(i, j);
+					check_neighbour(data[i0 + j0 * w], n, ij);
+					check_neighbour(data[i + j0 * w], n, ij);
+					check_neighbour(data[i1 + j0 * w], n, ij);
+					check_neighbour(data[i0 + j * w], n, ij);
+				}
+
+				for (int i = w - 1; i >= 0; --i) {
+					const int i1 = minimum(i + 1, w - 1);
+
+					IVec2* n = &data[j * w + i];
+					IVec2 ij(i, j);
+					check_neighbour(data[j * w + i1], n, ij);
+				}
 			}
 
-			for (int i = w - 1; i >= 0; --i) {
-				const int i1 = minimum(i + 1, w - 1);
+			for (int j = h - 1; j >= 0; --j) {
+				const int j0 = minimum(j + 1, h - 1);
+				for (int i = w - 1; i >= 0; --i) {
+					const int i0 = maximum(i - 1, 0);
+					const int i1 = minimum(i + 1, w - 1);
 
-				IVec2* n = &data[j * w + i];
-				IVec2 ij(i, j);
-				check_neighbour(data[j * w + i1], n, ij);
+					IVec2* n = &data[i + j * w];
+					IVec2 ij(i, j);
+					check_neighbour(data[i1 + j0 * w], n, ij);
+					check_neighbour(data[i + j0 * w], n, ij);
+					check_neighbour(data[i0 + j0 * w], n, ij);
+					check_neighbour(data[i1 + j * w], n, ij);
+				}
+
+				for (int i = w - 1; i >= 0; --i) {
+					const int i0 = maximum(i - 1, 0);
+
+					IVec2* n = &data[j * w + i];
+					IVec2 ij(i, j);
+					check_neighbour(data[j * w + i0], n, ij);
+				}
 			}
-		}
-
-		for (int j = h - 1; j >= 0; --j) {
-			const int j0 = minimum(j + 1, h - 1);
-			for (int i = w - 1; i >= 0; --i) {
-				const int i0 = maximum(i - 1, 0);
-				const int i1 = minimum(i + 1, w - 1);
-
-				IVec2* n = &data[i + j * w];
-				IVec2 ij(i, j);
-				check_neighbour(data[i1 + j0 * w], n, ij);
-				check_neighbour(data[i + j0 * w], n, ij);
-				check_neighbour(data[i0 + j0 * w], n, ij);
-				check_neighbour(data[i1 + j * w], n, ij);
-			}
-
-			for (int i = w - 1; i >= 0; --i) {
-				const int i0 = maximum(i - 1, 0);
-
-				IVec2* n = &data[j * w + i];
-				IVec2 ij(i, j);
-				check_neighbour(data[j * w + i0], n, ij);
-			}
-		}
+		};
+		compute();
 
 		for (u32 j = 0; j < h; ++j) {
 			for (u32 i = 0; i < w; ++i) {
 				const float d = length(Vec2(data[i + j * w] - IVec2(i, j)));
 				df->data[i + (h - j - 1) * w] = d;
+			}
+		}
+
+		// negative distance
+		for (i32 j = 0; j < (i32)h; ++j) {
+			for (i32 i = 0; i < (i32)w; ++i) {
+				if (bitmap[i + j * m_bitmap_size] == 0) {
+					data[i + j * m_bitmap_size] = IVec2(i, j);
+				}
+				else {
+					data[i + j * m_bitmap_size] = IVec2(INT_MIN, INT_MIN);
+				}
+			}
+		}
+
+		compute();
+
+		for (u32 j = 0; j < h; ++j) {
+			for (u32 i = 0; i < w; ++i) {
+				if (bitmap[i + j * m_bitmap_size] != 0) {
+					const float d = length(Vec2(data[i + j * w] - IVec2(i, j)));
+					df->data[i + (h - j - 1) * w] = -d;
+				}
 			}
 		}
 	}
@@ -3083,6 +3109,26 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		ImGui::InputTextMultiline("##scr", m_script, sizeof(m_script), size);
 		ImGuiEx::HSplitter("##scr_split", &size);
 		if (ImGui::Button("Run")) execute(m_script);
+		ImGui::SameLine();
+		if (ImGui::Button("Run map.lua")) {
+			os::InputFile file;
+			const StaticString<LUMIX_MAX_PATH> path(m_app.getEngine().getFileSystem().getBasePath(), "map.lua");
+			if (file.open(path)) {
+				Array<char> tmp(m_app.getAllocator());
+				tmp.resize(u32(file.size() + 1));
+				if (file.read(tmp.begin(), tmp.byte_size() - 1)) {
+					tmp.last() = 0;
+					execute(tmp.begin());
+				}
+				else {
+					logError("Failed to read ", path);
+				}
+				file.close();
+			}
+			else {
+				logError(path, " not found");
+			}
+		}
 
 		static char tag_key[64] = "";
 		static char tag_value[64] = "";
