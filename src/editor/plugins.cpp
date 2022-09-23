@@ -3230,8 +3230,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				float scale = 2.f / (1 << m_size);
 				p = p * ImVec2(scale, scale);
 				ImGui::SetCursorPos(p + cp);
-				if (tile->hm != (void*)(intptr_t)0xffFFffFF && m_show_hm) ImGui::ImageButton(tile->hm, ImVec2(TILE_SIZE * scale, TILE_SIZE* scale));
-				if (tile->imagery != (void*)(intptr_t)0xffFFffFF && !m_show_hm) ImGui::ImageButton(tile->imagery, ImVec2(TILE_SIZE* scale, TILE_SIZE* scale));
+				if (tile->hm != (void*)(intptr_t)0xffFFffFF && m_show_hm) ImGui::ImageButton("hm", tile->hm, ImVec2(TILE_SIZE * scale, TILE_SIZE* scale));
+				if (tile->imagery != (void*)(intptr_t)0xffFFffFF && !m_show_hm) ImGui::ImageButton("img", tile->imagery, ImVec2(TILE_SIZE* scale, TILE_SIZE* scale));
 				hovered = hovered || ImGui::IsItemHovered();
 			}
 		}
