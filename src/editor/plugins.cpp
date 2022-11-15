@@ -605,23 +605,23 @@ struct OSMParser {
 		res.yaw = atan2(dir.x, dir.z);
 
 		i32 max = 0;
-		i32 s = polygon.size();
+		i32 num_polygons = polygon.size();
 		for (i32 i = 1, c = polygon.size(); i < c; ++i) {
 			if (polygon[i].x > polygon[max].x) max = i;
 		}
 
-		const DVec3 a = polygon[(max - 1 + s) % s];
-		const DVec3 b = polygon[max];
-		const DVec3 c = polygon[(max + 1) % s];
-		const DVec3 ba = b - a;
-		const DVec3 ca = c - a;
+		const DVec3 p0 = polygon[(max - 1 + num_polygons) % num_polygons];
+		const DVec3 p1 = polygon[max];
+		const DVec3 p2 = polygon[(max + 1) % num_polygons];
+		const DVec3 ba = p1 - p0;
+		const DVec3 ca = p2 - p0;
 		const bool side_negative = ba.x * ca.z - ba.z * ca.x < 0;
 		RenderInterface* ri = m_app.getRenderInterface();
 		Universe* universe = m_app.getWorldEditor().getUniverse();
 
 		while (polygon.size() > 3) {
 			const i32 size = polygon.size(); 
-			for (i32 i = 0, c = polygon.size() - 1; i < c; ++i) {
+			for (i32 i = 0, ci = polygon.size() - 1; i < ci; ++i) {
 				if (isEar(polygon, i, side_negative)) {
 					const i32 s = polygon.size();
 					DVec3 a = polygon[(i - 1 + s) % s];
@@ -1162,15 +1162,17 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		const int map_size = TILE_SIZE * (1 << m_size);
 
 		char url[1024];
-		getSatellitePath(url, loc);
-		MapsTask* task = LUMIX_NEW(allocator, MapsTask)(m_app, &tile, allocator);
-		// https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2017_3857/default/g/2/1/1.jpg
-		task->host = "tiles.maps.eox.at";
-		task->path = url;
-		task->downloaded_bytes = &m_downloaded_bytes;
-		task->is_heightmap = false;
-		tile.imagery_task = task;
-		m_queue.push(task);
+		{
+			getSatellitePath(url, loc);
+			MapsTask* task = LUMIX_NEW(allocator, MapsTask)(m_app, &tile, allocator);
+			// https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2017_3857/default/g/2/1/1.jpg
+			task->host = "tiles.maps.eox.at";
+			task->path = url;
+			task->downloaded_bytes = &m_downloaded_bytes;
+			task->is_heightmap = false;
+			tile.imagery_task = task;
+			m_queue.push(task);
+		}
 
 		{
 			getHeightmapPath(url, loc);
@@ -2181,18 +2183,18 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			
 			m_osm_parser.getMultipolygon(r, multipolygon);
 
-			for (const Polygon2D& polygon : multipolygon.outer_polygons) {
+			for (const Polygon2D& poly : multipolygon.outer_polygons) {
 				points.clear();
-				for (const DVec2 p : polygon) {
+				for (const DVec2 p : poly) {
 					const DVec2 tmp = toBitmap(p);
 					points.push(Vec2(tmp));
 				}
 				raster(points, m_bitmap_size, 1, bitmap);
 			}
 			
-			for (const Polygon2D& polygon : multipolygon.inner_polygons) {
+			for (const Polygon2D& poly : multipolygon.inner_polygons) {
 				points.clear();
-				for (const DVec2 p : polygon) {
+				for (const DVec2 p : poly) {
 					DVec2 tmp = toBitmap(p);
 					points.push(Vec2(tmp));
 				}
