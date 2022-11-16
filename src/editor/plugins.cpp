@@ -79,7 +79,6 @@ struct TileLoc {
 	int x, y, z;
 };
 
-static const ComponentType SPLINE_GEOMETRY_TYPE = reflection::getComponentType("spline_geometry");
 static const ComponentType SPLINE_TYPE = reflection::getComponentType("spline");
 static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
 static const ComponentType TERRAIN_TYPE = reflection::getComponentType("terrain");
@@ -2468,7 +2467,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	}
 	
 	void placeSplines(lua_State* L) {
-		const WayDef def(L);
+		/*const WayDef def(L);
 		TerrainEditor* terrain_editor = static_cast<TerrainEditor*>(m_app.getMousePlugin("terrain_editor"));
 		
 		char material_path[LUMIX_MAX_PATH];
@@ -2520,7 +2519,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 		editor.endCommandGroup();
 		EntityRef e = *terrain_entity;
-		editor.selectEntities(Span(&e, 1), false);
+		editor.selectEntities(Span(&e, 1), false);*/
+		logError("placeSplines not implemented");
+		ASSERT(false);
 	}
 
 	void placeDecals(lua_State* L) {
