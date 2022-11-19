@@ -11,3 +11,5 @@
 You can use this plugin to easily create real-world terrains in Lumix Engine. It downloads height maps from [Amazon](https://aws.amazon.com/public-datasets/terrain/) and satellite maps from [EOX](https://maps.eox.at/). It can read [OSM](https://www.openstreetmap.org/#map=14/48.6627/17.9527) data and use them to place roads, buildings and other objects. Read their licenses to find out what can you use this data for.
 
 You can use [itch.io](https://mikulasflorek.itch.io/lumix-engine) to download the engine with maps plugin already installed. It's used to develop [On the hunt](https://mikulasflorek.itch.io/on-the-hunt) game.
+
+[How to download and open OSM data](https://www.youtube.com/watch?v=8FMh-N8l_cA)
