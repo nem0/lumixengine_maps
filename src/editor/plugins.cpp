@@ -46,8 +46,8 @@
  	#include <unistd.h>
  #endif
 
-#include <cmath>
-#include <cstdlib>
+#include <math.h>
+#include <stdlib.h>
 #pragma comment(lib, "Ws2_32.lib")
 #pragma warning(disable : 4996)
 
@@ -68,6 +68,13 @@ enum class NodeType : u32 {
 	PAINT_GROUND,
 	GROW_MASK,
 	SHRINK_MASK,
+	INVERT,
+	GRASS,
+	NOISE,
+	MASK_TEXTURE,
+	MERGE_MASKS,
+	DISTANCE_FIELD,
+	PLACE_INSTANCES
 };
 
 static const struct {
@@ -79,8 +86,49 @@ static const struct {
 	{ 'P', "Mask polygons", NodeType::MASK_POLYGONS },
 	{ 'G', "Paint ground", NodeType::PAINT_GROUND },
 	{ 'B', "Grow mask", NodeType::GROW_MASK },
-	{ 'S', "Shrink mask", NodeType::SHRINK_MASK }
+	{ 'S', "Shrink mask", NodeType::SHRINK_MASK },
+	{ 'I', "Invert", NodeType::INVERT },
+	{ 'R', "Grass", NodeType::GRASS },
+	{ 'N', "Noise", NodeType::NOISE },
+	{ 'M', "Merge", NodeType::MERGE_MASKS },
+	{ 'D', "Distance field", NodeType::DISTANCE_FIELD },
+	{ 0, "Place instances", NodeType::PLACE_INSTANCES },
 };
+
+template <typename T>
+static u32 getRandomItem(float distance, const Array<T>& probs) {
+	float sum = 0;
+
+	auto get = [](float distance, const T& prob){
+		if (distance < prob.distances.x) return 0.f;
+		if (distance > prob.distances.w) return 0.f;
+		
+		if (distance < prob.distances.y) {
+			return prob.multiplier * (distance - prob.distances.x) / (prob.distances.y - prob.distances.x);
+		}
+		else if (distance < prob.distances.z) {
+			return prob.multiplier;
+		}
+		return prob.multiplier * (1 - (distance - prob.distances.z) / (prob.distances.w - prob.distances.z));
+	};
+
+	for (const T& prob : probs) {
+		sum += get(distance, prob);
+	}
+	if (sum == 0) return 0;
+	
+	float r = randFloat() * sum;
+
+	for (i32 i = 0; i < probs.size(); ++i) {
+		const T& prob = probs[i];
+		float p = get(distance, prob);
+		if (r < p) return i;
+		r -= p;
+	}
+	
+	ASSERT(false);
+	return 0;
+}
 
 static bool tagInput(Span<char> key, Span<char> value, Span<const char*> values, float width) {
 	ImGui::TextUnformatted("Tag"); ImGui::SameLine();
@@ -109,12 +157,21 @@ static bool tagInput(Span<char> key, Span<char> value, Span<const char*> values,
 }
 
 enum class OutputType {
-	MASK
+	MASK,
+	DISTANCE_FIELD
 };
 
 struct OutputValue {
 	virtual ~OutputValue() {}
 	virtual OutputType getType() = 0;
+};
+
+struct DistanceFieldOutput : OutputValue {
+	DistanceFieldOutput(IAllocator& allocator) : m_field(allocator) {}
+	OutputType getType() override { return OutputType::DISTANCE_FIELD; }
+	
+	u32 m_size;
+	Array<float> m_field;
 };
 
 struct MaskOutput : OutputValue {
@@ -282,7 +339,8 @@ struct OSMParser {
 		, m_nodes(m_app.getAllocator())
 		, m_ways(m_app.getAllocator())
 		, m_relations(m_app.getAllocator())
-	{}
+	{
+	}
 
 	void showNodes(const char* tag_key, const char* tag_value, EntityRef terrain, Array<UniverseView::Vertex>& out) {
 		WorldEditor& editor = m_app.getWorldEditor();
@@ -624,7 +682,7 @@ struct OSMParser {
 		Vec3 dir = Vec3(polygon[0] - polygon[1]);
 		dir.y = 0;
 		dir = normalize(dir);
-		res.yaw = atan2(dir.x, dir.z);
+		res.yaw = atan2f(dir.x, dir.z);
 
 		i32 max = 0;
 		i32 num_polygons = polygon.size();
@@ -765,9 +823,38 @@ struct OSMParser {
 	float m_scale = 1;
 };
 
+static double long2tilex(double long lon, int z) {
+	return (lon + 180) * (1 << z) / 360.0;
+}
+
+static double tilex2long(double x, int z) {
+	return x / pow(2.0, z) * 360.0 - 180;
+}
+
+static double lat2tiley(double lat, int z) { 
+	const double latrad = lat * PI / 180.0;
+	return (1.0 - asinh(tan(latrad)) / PI) / 2.0 * (1 << z); 
+}
+
+static double tiley2lat(double y, int z) {
+	double n = PI - 2.0 * PI * y / pow(2.0, z);
+	return 180.0 / PI * atan(0.5 * (exp(n) - exp(-n)));
+}
+
+static EntityPtr getTerrainEntity(StudioApp& app) {
+	WorldEditor& editor = app.getWorldEditor();
+	if (editor.getSelectedEntities().size() != 1) return INVALID_ENTITY;
+	const Universe* universe = editor.getUniverse();
+	const EntityRef terrain = editor.getSelectedEntities()[0];
+	if (!universe->hasComponent(terrain, TERRAIN_TYPE)) return INVALID_ENTITY;
+	return terrain;
+}
+
 struct OSMNodeEditor : NodeEditor {
 	struct Node : NodeEditorNode {
 		virtual NodeType getType() const = 0;
+		virtual void serialize(OutputMemoryStream& blob) = 0;
+		virtual void deserialize(InputMemoryStream& blob) = 0;
 		virtual bool gui() = 0;
 		virtual UniquePtr<OutputValue> getOutputValue(u16 output_idx) = 0;
 
@@ -796,7 +883,29 @@ struct OSMNodeEditor : NodeEditor {
 			operator bool() const { return node; }
 		};
 
-		Input getInput(u16 input_idx);
+		void nodeTitle(const char* label) {
+			ImGuiEx::BeginNodeTitleBar();
+			ImGui::TextUnformatted(label);
+			previewButton();
+			ImGuiEx::EndNodeTitleBar();
+		}
+
+		void previewButton() {
+			EntityPtr terrain = getTerrainEntity(m_editor->m_app);
+			if (!terrain.isValid()) return;
+			ImGui::SameLine();
+			if (ImGui::Button(ICON_FA_SEARCH)) {
+				UniquePtr<OutputValue> out = getOutputValue(0);
+				if (out) {
+					switch(out->getType()) {
+						case OutputType::MASK: m_editor->visualize((MaskOutput*)out.get()); break;
+						case OutputType::DISTANCE_FIELD: m_editor->visualize((DistanceFieldOutput*)out.get()); break;
+					}
+				}
+			}
+		}
+
+		UniquePtr<OutputValue> getInput(u16 input_idx);
 
 		OSMNodeEditor* m_editor;
 		u32 m_input_counter;
@@ -811,15 +920,154 @@ struct OSMNodeEditor : NodeEditor {
 		, m_links(app.getAllocator())
 		, m_nodes(app.getAllocator())
 		, m_debug_tris(app.getAllocator())
+		, m_recent_paths(app.getAllocator())
 		, m_osm_parser(app)
-	{}
+	{
+		pushUndo(NO_MERGE_UNDO);
+
+		m_save_action.init(ICON_FA_SAVE "Save", "Maps nodes save", "maps_nodes_save", ICON_FA_SAVE, os::Keycode::S, Action::Modifiers::CTRL, true);
+		m_save_action.func.bind<&OSMNodeEditor::save>(this);
+		m_save_action.plugin = this;
+
+		m_run_action.init(ICON_FA_PLAY "Run", "Maps nodes run", "maps_nodes_run", ICON_FA_PLAY, (os::Keycode)'P', Action::Modifiers::CTRL, true);
+		m_run_action.func.bind<&OSMNodeEditor::run>(this);
+		m_run_action.plugin = this;
+
+		m_undo_action.init(ICON_FA_UNDO "Undo", "Maps nodes undo", "maps_nodes_undo", ICON_FA_UNDO, os::Keycode::Z, Action::Modifiers::CTRL, true);
+		m_undo_action.func.bind<&OSMNodeEditor::undo>((SimpleUndoRedo*)this);
+		m_undo_action.plugin = this;
+
+		m_redo_action.init(ICON_FA_REDO "Redo", "Maps nodes redo", "maps_nodes_redo", ICON_FA_REDO, os::Keycode::Z, Action::Modifiers::CTRL | Action::Modifiers::SHIFT, true);
+		m_redo_action.func.bind<&OSMNodeEditor::redo>((SimpleUndoRedo*)this);
+		m_redo_action.plugin = this;
+
+		app.addAction(&m_save_action);
+		app.addAction(&m_run_action);
+		app.addAction(&m_undo_action);
+		app.addAction(&m_redo_action);
+	}
+
+	~OSMNodeEditor() {
+		m_app.removeAction(&m_save_action);
+		m_app.removeAction(&m_run_action);
+		m_app.removeAction(&m_undo_action);
+		m_app.removeAction(&m_redo_action);
+		destroyPreviewTexture();
+	}
 
 	void run();
 
+	void onBeforeSettingsSaved(Settings& settings) {
+		for (const String& p : m_recent_paths) {
+			const u32 i = u32(&p - m_recent_paths.begin());
+			const StaticString<32> key("maps_plugin_recent_", i);
+			settings.setValue(Settings::LOCAL, key, p.c_str());
+		}
+	}
+
+	void onSettingsLoaded(Settings& settings) {
+		m_recent_paths.clear();
+		char tmp[LUMIX_MAX_PATH];
+		for (u32 i = 0; ; ++i) {
+			const StaticString<32> key("maps_plugin_recent_", i);
+			const u32 len = settings.getValue(Settings::LOCAL, key, Span(tmp));
+			if (len == 0) break;
+			m_recent_paths.emplace(tmp, m_app.getAllocator());
+		}
+	}
+
+	void destroyPreviewTexture() {
+		RenderInterface* ri = m_app.getRenderInterface();
+		if (!ri) return;
+		if (m_preview_texture == (ImTextureID)(intptr_t)0xffFFffFF) return;
+		ri->destroyTexture(m_preview_texture);
+		m_preview_texture = (ImTextureID)(intptr_t)0xffFFffFF;
+	}
+
+	void visualize(DistanceFieldOutput* df) {
+		destroyPreviewTexture();
+		
+		RenderInterface* ri = m_app.getRenderInterface();
+		Array<u32> tmp(m_app.getAllocator());
+		tmp.resize(df->m_field.size());
+		for (u32 i = 0, c = df->m_field.size(); i < c; ++i) {
+			u8 v = u8(clamp(df->m_field[i], 0.f, 255.f));
+			tmp[i] = 0xff000000 | (v << 16) | (v << 8) | v;
+		}
+		m_preview_texture = ri->createTexture("maps_debug", tmp.begin(), df->m_size, df->m_size);
+		m_preview_size = df->m_size;
+		m_show_preview = true;
+	}	
+
+	void visualize(MaskOutput* mask) {
+		destroyPreviewTexture();
+		RenderInterface* ri = m_app.getRenderInterface();
+		Array<u32> tmp(m_app.getAllocator());
+		tmp.resize(mask->m_bitmap.size());
+		for (u32 i = 0, c = mask->m_bitmap.size(); i < c; ++i) {
+			u32 v = mask->m_bitmap[i];
+			tmp[i] = Color(v, v, v, 0xff).abgr();
+		}
+		m_preview_texture = ri->createTexture("maps_debug", tmp.begin(), mask->m_size, mask->m_size);
+		m_preview_size = mask->m_size;
+		m_show_preview = true;
+	}
+
+	void pushRecent(const char* path) {
+		String p(path, m_app.getAllocator());
+		m_recent_paths.eraseItems([&](const String& s) { return s == path; });
+		m_recent_paths.push(static_cast<String&&>(p));
+	}
+
 	Node* addNode(NodeType type, ImVec2 pos, bool save_undo);
 
-	void deserialize(InputMemoryStream& blob) override {}
-	void serialize(OutputMemoryStream& blob) override {}
+	struct Header {
+		static const u32 MAGIC = 'LMAP';
+		u32 magic = MAGIC;
+		u32 version = 0;
+	};
+
+	void deserialize(InputMemoryStream& blob) override {
+		for (Node* n : m_nodes) LUMIX_DELETE(m_app.getAllocator(), n);
+		m_nodes.clear();
+		m_links.clear();
+
+		Header header;
+		blob.read(header);
+		u32 count;
+		blob.read(count);
+		m_links.resize(count);
+		for (NodeEditorLink& link : m_links) {
+			blob.read(link.from);
+			blob.read(link.to);
+		}
+		blob.read(count);
+		for (u32 i = 0; i < count; ++i) {
+			NodeType type;
+			blob.read(type);
+			Node* n = addNode(type, Vec2(0, 0), false);
+			blob.read(n->m_id);
+			blob.read(n->m_pos);
+			n->deserialize(blob);
+		}
+	}
+	
+	void serialize(OutputMemoryStream& blob) override {
+		Header header;
+		blob.write(header);
+		blob.write(m_links.size());
+		for (const NodeEditorLink& link : m_links) {
+			blob.write(link.from);
+			blob.write(link.to);
+		}
+		blob.write(m_nodes.size());
+		for (Node* node : m_nodes) {
+			blob.write(node->getType());
+			blob.write(node->m_id);
+			blob.write(node->m_pos);
+			node->serialize(blob);
+		}
+	}
 	
 	void onCanvasClicked(ImVec2 pos, i32 hovered_link) override {
 		for (const auto& t : TYPES) {
@@ -842,7 +1090,114 @@ struct OSMNodeEditor : NodeEditor {
 		}
 	}
 
-	void gui() {
+	void open(const char* path) {
+		FileSystem& fs = m_app.getEngine().getFileSystem();
+		
+		OutputMemoryStream blob(m_app.getAllocator());
+		if (!fs.getContentSync(Path(path), blob)) {
+			logError("Could not load ", path);
+			return;
+		}
+		InputMemoryStream tmp(blob);
+		deserialize(tmp);
+		pushUndo(NO_MERGE_UNDO);
+		m_path = path;
+		pushRecent(path);
+	}
+
+	void saveAs(const char* path) {
+		OutputMemoryStream blob(m_app.getAllocator());
+		serialize(blob);
+		
+		FileSystem& fs = m_app.getEngine().getFileSystem();
+		os::OutputFile file;
+		if (!fs.open(path, file)) {
+			logError("Could not save ", path);
+			return;
+		}
+
+		if (!file.write(blob.data(), blob.size())) {
+			logError("Could not save ", path);
+		}
+		file.close();
+		m_path = path;
+		pushRecent(path);
+	}
+
+	void save() {
+		if (m_path.isEmpty()) m_show_save_as = true;
+		else saveAs(m_path.c_str());
+	}
+
+	bool canLoadMapOSM() const {
+		FileSystem& fs = m_app.getEngine().getFileSystem();
+		return fs.fileExists("map.osm");
+	}
+
+	void gui(i32 x, i32 y, IVec2 pixel_offset, i32 zoom, float scale, i32 size) {
+		if (m_show_preview) {
+			ImGui::OpenPopup("Preview");
+			m_show_preview = false;
+			m_preview_size = minimum(512, m_preview_size);
+		}
+		if (ImGui::BeginPopup("Preview")) {
+			ImGui::Image(m_preview_texture, ImVec2((float)m_preview_size, (float)m_preview_size));
+			ImGui::EndPopup();
+		}
+		ImGui::BeginChild("osm", ImVec2(0, 0), false, ImGuiWindowFlags_MenuBar);
+
+		double dl_bottom = double(tiley2lat(double(y - (pixel_offset.y - m_area_edge) / 256.0), zoom));
+		double dl_left = double(tilex2long(double(x - (pixel_offset.x - m_area_edge) / 256.0), zoom));
+		double dl_top = double(tiley2lat(double(y - m_area_edge / 256.0 - pixel_offset.y / 256.0 + (1 << size)), zoom));
+		double dl_right = double(tilex2long(double(x - m_area_edge / 256.0 - pixel_offset.x / 256.0 + (1 << size)), zoom));
+
+		double bottom = double(tiley2lat(double(y - pixel_offset.y / 256.0), zoom));
+		double left = double(tilex2long(double(x - pixel_offset.x / 256.0), zoom));
+		double top = double(tiley2lat(double(y - pixel_offset.y / 256.0 + (1 << size)), zoom));
+		double right = double(tilex2long(double(x - pixel_offset.x / 256.0 + (1 << size)), zoom));
+		if (bottom > top) swap(bottom, top);
+		if (left > right) swap(left, right);
+		if (dl_bottom > dl_top) swap(dl_bottom, dl_top);
+		if (dl_left > dl_right) swap(dl_left, dl_right);
+
+		const float level_scale = scale * float(256 * (1 << size) * 156543.03 * cos(degreesToRadians(bottom)) / (1 << zoom));
+
+		if (ImGui::BeginMenuBar()) {
+			if (ImGui::BeginMenu("File")) {
+				menuItem(m_save_action, true);
+				if (ImGui::MenuItem("Save As")) m_show_save_as = true;
+				if (ImGui::MenuItem("Open")) m_show_open = true;
+				if (ImGui::BeginMenu("Recent", !m_recent_paths.empty())) {
+					for (const String& s : m_recent_paths) {
+						if (ImGui::MenuItem(s.c_str())) open(s.c_str());
+					}
+					ImGui::EndMenu();
+				}
+				menuItem(m_run_action, true);
+				ImGui::EndMenu();
+			}
+			if (ImGui::BeginMenu("OSM data")) {
+				if (ImGui::MenuItem("Load map.osm", nullptr, false, canLoadMapOSM())) m_osm_parser.parseOSM(left, bottom, right, top, level_scale);
+				if (ImGui::MenuItem(ICON_FA_FILE_DOWNLOAD "Download map.osm")) {
+					const StaticString<1024> osm_download_path("https://api.openstreetmap.org/api/0.6/map?bbox=", dl_left, ",", dl_bottom, ",", dl_right, ",", dl_top);
+					os::shellExecuteOpen(osm_download_path);
+				}
+				ImGui::DragInt("Area edge", &m_area_edge);
+				ImGui::EndMenu();
+			}
+			if (ImGui::BeginMenu("Edit")) {
+				menuItem(m_undo_action, canUndo());
+				menuItem(m_redo_action, canRedo());
+				if (ImGui::MenuItem(ICON_FA_BRUSH " Clear visualization")) m_debug_tris.clear();
+				ImGui::EndMenu();
+			}
+			ImGui::EndMenuBar();
+		}
+
+		FileSelector& fs = m_app.getFileSelector();
+		if (fs.gui("Open", &m_show_open, "mpg", false)) open(fs.getPath());
+		if (fs.gui("Save As", &m_show_save_as, "mpg", true)) saveAs(fs.getPath());
+		
 #if 0
 		const EntityPtr terrain = getTerrain();
 		if (terrain.isValid()) {
@@ -873,11 +1228,8 @@ struct OSMNodeEditor : NodeEditor {
 			}
 		}
 
-		if (ImGui::Button(ICON_FA_PLAY " Run all")) run();
-		ImGui::SameLine();
-		if (ImGui::Button(ICON_FA_BRUSH " Clear visualization")) m_debug_tris.clear();
-
 		nodeEditorGUI(m_nodes, m_links);
+		ImGui::EndChild();
 	}
 
 	OSMParser m_osm_parser;
@@ -887,6 +1239,18 @@ struct OSMNodeEditor : NodeEditor {
 	Array<Node*> m_nodes;
 	u32 m_node_id_genereator = 1;
 	Array<UniverseView::Vertex> m_debug_tris;
+	Array<String> m_recent_paths;
+	Action m_run_action;
+	Action m_save_action;
+	Action m_undo_action;
+	Action m_redo_action;
+	i32 m_area_edge = 0;
+	bool m_show_save_as = false;
+	bool m_show_open = false;
+	Path m_path;
+	ImTextureID m_preview_texture = (ImTextureID)(intptr_t)0xffFFffFF;
+	bool m_show_preview = false;
+	u32 m_preview_size = 0;
 };
 
 template <typename F>
@@ -902,16 +1266,20 @@ static void	forEachInput(const OSMNodeEditor& resource, int node_id, const F& f)
 	}
 }
 
-OSMNodeEditor::Node::Input OSMNodeEditor::Node::getInput(u16 input_idx) {
-	Input res;
+UniquePtr<OutputValue> OSMNodeEditor::Node::getInput(u16 input_idx) {
+	Node* node = nullptr;
+	u16 output_idx = 0;
 	forEachInput(*m_editor, m_id, [&](Node* from, u16 from_attr, u16 to_attr, u32 link_idx){
 		if (to_attr == input_idx) {
-			res.output_idx = from_attr;
-			res.node = from;
+			output_idx = from_attr;
+			node = from;
 		}
 	});
-	return res;
+
+	if (!node) return {};
+	return node->getOutputValue(output_idx);
 }
+
 
 static void raster(u8 value, const IVec2& p0, const IVec2& p1, u32 size, Array<u8>& out) {
 	// naive line rasterization
@@ -1009,15 +1377,6 @@ static void raster(Span<const Vec2> points, u32 w, i32 change, Array<u8>& out) {
 	}
 }
 
-static EntityPtr getTerrain(StudioApp& app) {
-	WorldEditor& editor = app.getWorldEditor();
-	if (editor.getSelectedEntities().size() != 1) return INVALID_ENTITY;
-	const Universe* universe = editor.getUniverse();
-	const EntityRef terrain = editor.getSelectedEntities()[0];
-	if (!universe->hasComponent(terrain, TERRAIN_TYPE)) return INVALID_ENTITY;
-	return terrain;
-}
-
 static Terrain* getSelectedTerrain(StudioApp& app) {
 	WorldEditor& editor = app.getWorldEditor();
 	Universe* universe = app.getWorldEditor().getUniverse();
@@ -1030,15 +1389,30 @@ static Terrain* getSelectedTerrain(StudioApp& app) {
 	return scene->getTerrain(selected_entities[0]);
 }
 
+static u32 getSplatmapSize(StudioApp& app) {
+	const Terrain* terrain = getSelectedTerrain(app);
+	if (!terrain) return 1024;
+	Texture* splatmap = terrain->getSplatmap();
+	if (!splatmap || !splatmap->isReady()) return 1024;
+	return splatmap->width;
+}
+
 struct GrowMaskNode : OSMNodeEditor::Node {
 	NodeType getType() const override { return NodeType::GROW_MASK; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return true; }
+
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(m_iterations);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(m_iterations);
+	}
 	
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
-		const Input input = getInput(0);
-		if (!input) return {};
-		UniquePtr<OutputValue> input_value = input.node->getOutputValue(input.output_idx);
+		UniquePtr<OutputValue> input_value = getInput(0);
+		if (!input_value) return {};
 		if (input_value->getType() != OutputType::MASK) return {};
 		MaskOutput* mask = (MaskOutput*)input_value.get();
 
@@ -1048,7 +1422,7 @@ struct GrowMaskNode : OSMNodeEditor::Node {
 		output->m_bitmap.resize(mask->m_bitmap.size());
 
 
-		for (u32 iter = 0; iter < iterations; ++iter) {
+		for (u32 iter = 0; iter < m_iterations; ++iter) {
 			Array<u8>& a = iter % 2 == 0 ? output->m_bitmap : mask->m_bitmap;
 			Array<u8>& b = iter % 2 == 0 ? mask->m_bitmap : output->m_bitmap;
 			auto get = [&](i32 i, i32 j){
@@ -1074,7 +1448,7 @@ struct GrowMaskNode : OSMNodeEditor::Node {
 				}
 			}
 		}
-		if (iterations % 2 == 0) {
+		if (m_iterations % 2 == 0) {
 			return input_value.move();
 		}
 
@@ -1085,20 +1459,679 @@ struct GrowMaskNode : OSMNodeEditor::Node {
 		ImGuiEx::NodeTitle("Grow mask");
 		inputSlot();
 		outputSlot();
-		return ImGui::DragInt("Iterations", (i32*)&iterations, 1, 0, 999999);
+		return ImGui::DragInt("Iterations", (i32*)&m_iterations, 1, 0, 999999);
 	}
 
-	u32 iterations = 1;
+	u32 m_iterations = 1;
+};
+
+struct GrassNode : OSMNodeEditor::Node {
+	NodeType getType() const override { return NodeType::GRASS; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return false; }
+	void serialize(OutputMemoryStream& blob) override {}
+	void deserialize(InputMemoryStream& blob) override {}
+	
+	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override { ASSERT(false); return {}; }
+	
+	void run() {
+		UniquePtr<OutputValue> input = getInput(0);
+		if (!input) return;
+		if (input->getType() != OutputType::MASK) return;
+		const MaskOutput* mask = (MaskOutput*)input.get();
+
+		Terrain* terrain = getSelectedTerrain(m_editor->m_app);
+		if (!terrain) return;
+
+		Texture* splatmap = terrain->getSplatmap();
+		if (!splatmap) {
+			logWarning("Missing splatmap");
+			return;
+		}
+		if (!splatmap->isReady()) {
+			logWarning("Splatmap not ready");
+			return;
+		}
+
+		auto is_masked = [&](u32 x, u32 y){
+			u32 i = u32(x / float(splatmap->width) * mask->m_size + 0.5f);
+			u32 j = u32(y / float(splatmap->height) * mask->m_size + 0.5f);
+			i = clamp(i, 0, mask->m_size - 1);
+			j = clamp(j, 0, mask->m_size - 1);
+			
+			return mask->m_bitmap[i + j * mask->m_size] != 0;
+		};
+
+		u8* data = splatmap->getData();
+		for (u32 y = 0; y < splatmap->height; ++y) {
+			for (u32 x = 0; x < splatmap->width; ++x) {
+				if (is_masked(x, y)) {
+					u8* pixel = data + (x + (splatmap->height - y - 1) * splatmap->width) * 4;
+					if (m_additive) {
+						u16* tmp = (u16*)(pixel + 2);
+						*tmp |= m_grass;
+					}
+					else {
+						memcpy(pixel + 2, &m_grass, sizeof(m_grass));
+					}
+				}
+			}
+		}
+		splatmap->onDataUpdated(0, 0, splatmap->width, splatmap->height);
+		terrain->setGrassDirty();
+	}
+
+	bool gui() override {
+		ImGuiEx::NodeTitle("Grass");
+		bool res = ImGui::Checkbox("Additive", &m_additive);
+		i32 g = m_grass;
+		if (ImGui::InputInt("Grass", &g)) {
+			m_grass = g;
+			res = true;
+		}
+		inputSlot();
+		return res;
+	}
+
+	u16 m_grass = 0;
+	bool m_additive = false;
+};
+
+struct MergeMasksNode : OSMNodeEditor::Node {
+	NodeType getType() const override { return NodeType::MERGE_MASKS; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return true; }
+	
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(m_mode);
+	}
+	
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(m_mode);
+	}
+
+	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
+		UniquePtr<OutputValue> input0 = getInput(0);
+		UniquePtr<OutputValue> input1 = getInput(1);
+		if (!input0) return {};
+		if (!input1) return {};
+		if (input0->getType() != OutputType::MASK) return {};
+		if (input1->getType() != OutputType::MASK) return {};
+		MaskOutput* mask0 = (MaskOutput*)input0.get();
+		MaskOutput* mask1 = (MaskOutput*)input1.get();
+
+		switch (m_mode) {
+			case DIFFERENECE:
+				for (u32 i = 0, c = mask0->m_bitmap.size(); i < c; ++i) {
+					mask0->m_bitmap[i] = mask0->m_bitmap[i] != 0 && mask1->m_bitmap[i] == 0;
+				}
+				break;
+			case INTERSECTION:
+				for (u32 i = 0, c = mask0->m_bitmap.size(); i < c; ++i) {
+					mask0->m_bitmap[i] = mask0->m_bitmap[i] != 0 && mask1->m_bitmap[i] != 0;
+				}
+				break;
+			case UNION:
+				for (u32 i = 0, c = mask0->m_bitmap.size(); i < c; ++i) {
+					mask0->m_bitmap[i] = mask0->m_bitmap[i] != 0 || mask1->m_bitmap[i] != 0;
+				}
+				break;
+		}
+
+		return input0.move();
+	}
+
+	bool gui() override {
+		nodeTitle("Merge");
+		ImGui::BeginGroup();
+		inputSlot(); ImGui::TextUnformatted("A");
+		inputSlot(); ImGui::TextUnformatted("B");
+		ImGui::EndGroup();
+		ImGui::SameLine();
+		ImGui::Combo("Mode", (i32*)&m_mode, "Union\0Intersection\0Difference\0");
+		ImGui::SameLine();
+		outputSlot();
+		return false;
+	}
+
+	enum Mode : u32 {
+		UNION,
+		INTERSECTION,
+		DIFFERENECE
+	};
+	
+	Mode m_mode = UNION;
+};
+
+struct DistanceFieldNode : OSMNodeEditor::Node {
+	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
+		UniquePtr<OutputValue> input = getInput(0);
+		if (!input) return {};
+		if (input->getType() != OutputType::MASK) return {};
+		MaskOutput* mask = (MaskOutput*)input.get();
+
+		IAllocator& allocator = m_editor->m_app.getAllocator();
+		UniquePtr<DistanceFieldOutput> df = UniquePtr<DistanceFieldOutput>::create(allocator, allocator);
+		df->m_size = getSplatmapSize(m_editor->m_app);
+		df->m_field.resize(df->m_size * df->m_size);
+		ASSERT(df->m_size == mask->m_size);
+		
+		Array<IVec2> data_ar(m_editor->m_app.getAllocator());
+
+		const u32 w = df->m_size;
+		const u32 h = df->m_size;
+		data_ar.resize(w * h);
+		IVec2* data = data_ar.begin();
+
+		auto check_neighbour = [](const IVec2& p, IVec2* n, IVec2 ij) {
+			IVec2 a = p - ij;
+			IVec2 b = *n - ij;
+			if (a.x * a.x + a.y * a.y < b.x * b.x + b.y * b.y) {
+				*n = p;
+			}
+		};
+
+		const u8* bitmap = mask->m_bitmap.begin();
+		for (i32 j = 0; j < (i32)h; ++j) {
+			for (i32 i = 0; i < (i32)w; ++i) {
+				if (bitmap[i + j * w] != 0) {
+					data[i + j * w] = IVec2(i, j);
+				}
+				else {
+					data[i + j * w] = IVec2(INT_MIN, INT_MIN);
+				}
+			}
+		}
+
+		auto compute = [&](){
+			for (i32 j = 0; j < (i32)h; ++j) {
+				const int j0 = maximum(j - 1, 0);
+				for (i32 i = 0; i < (i32)w; ++i) {
+					const int i0 = maximum(i - 1, 0);
+					const int i1 = minimum(i + 1, w - 1);
+
+					IVec2* n = &data[i + j * w];
+					IVec2 ij(i, j);
+					check_neighbour(data[i0 + j0 * w], n, ij);
+					check_neighbour(data[i + j0 * w], n, ij);
+					check_neighbour(data[i1 + j0 * w], n, ij);
+					check_neighbour(data[i0 + j * w], n, ij);
+				}
+
+				for (int i = w - 1; i >= 0; --i) {
+					const int i1 = minimum(i + 1, w - 1);
+
+					IVec2* n = &data[j * w + i];
+					IVec2 ij(i, j);
+					check_neighbour(data[j * w + i1], n, ij);
+				}
+			}
+
+			for (int j = h - 1; j >= 0; --j) {
+				const int j0 = minimum(j + 1, h - 1);
+				for (int i = w - 1; i >= 0; --i) {
+					const int i0 = maximum(i - 1, 0);
+					const int i1 = minimum(i + 1, w - 1);
+
+					IVec2* n = &data[i + j * w];
+					IVec2 ij(i, j);
+					check_neighbour(data[i1 + j0 * w], n, ij);
+					check_neighbour(data[i + j0 * w], n, ij);
+					check_neighbour(data[i0 + j0 * w], n, ij);
+					check_neighbour(data[i1 + j * w], n, ij);
+				}
+
+				for (int i = w - 1; i >= 0; --i) {
+					const int i0 = maximum(i - 1, 0);
+
+					IVec2* n = &data[j * w + i];
+					IVec2 ij(i, j);
+					check_neighbour(data[j * w + i0], n, ij);
+				}
+			}
+		};
+		compute();
+
+		for (u32 j = 0; j < h; ++j) {
+			for (u32 i = 0; i < w; ++i) {
+				const float d = length(Vec2(data[i + j * w] - IVec2(i, j)));
+				df->m_field[i + (h - j - 1) * w] = d;
+			}
+		}
+
+		// negative distance
+		for (i32 j = 0; j < (i32)h; ++j) {
+			for (i32 i = 0; i < (i32)w; ++i) {
+				if (bitmap[i + j * w] == 0) {
+					data[i + j * w] = IVec2(i, j);
+				}
+				else {
+					data[i + j * w] = IVec2(INT_MIN, INT_MIN);
+				}
+			}
+		}
+
+		compute();
+
+		for (u32 j = 0; j < h; ++j) {
+			for (u32 i = 0; i < w; ++i) {
+				if (bitmap[i + j * w] != 0) {
+					const float d = length(Vec2(data[i + j * w] - IVec2(i, j)));
+					df->m_field[i + (h - j - 1) * w] = -d;
+				}
+			}
+		}
+		return df.move();
+	}
+
+	NodeType getType() const override { return NodeType::DISTANCE_FIELD; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return true; }
+	void serialize(OutputMemoryStream& blob) override {}
+	void deserialize(InputMemoryStream& blob) override {}
+
+	bool gui() override {
+		nodeTitle("Distance field");
+		inputSlot();
+		outputSlot();
+		ImGui::TextUnformatted("Input mask");
+		return false;
+	}
+};
+
+struct PlaceInstancesNode : OSMNodeEditor::Node {
+	PlaceInstancesNode(IAllocator& allocator)
+		: m_models(allocator)
+	{}
+
+	~PlaceInstancesNode() {
+		for (const ModelProbability& mp : m_models) {
+			if (mp.resource) mp.resource->decRefCount();
+		}
+	}
+
+	NodeType getType() const override { return NodeType::PLACE_INSTANCES; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return false; }
+	
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(m_spacing);
+		blob.write(m_models.size());
+		for (const ModelProbability& mp : m_models) {
+			blob.writeString(mp.resource ? mp.resource->getPath().c_str() : "");
+			blob.write(mp.distances);
+			blob.write(mp.scale);
+			blob.write(mp.y_offset);
+			blob.write(mp.multiplier);
+		}
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		ResourceManagerHub& rm = m_editor->m_app.getEngine().getResourceManager();
+		blob.read(m_spacing);
+		u32 count;
+		blob.read(count);
+		m_models.resize(count);
+		for (ModelProbability& mp : m_models) {
+			const char* path = blob.readString();
+			if (path[0]) {
+				mp.resource = rm.load<Model>(Path(path));
+			}
+			else {
+				mp.resource = nullptr;
+			}
+			blob.read(mp.distances);
+			blob.read(mp.scale);
+			blob.read(mp.y_offset);
+			blob.read(mp.multiplier);
+		}
+	}
+
+	void run() {
+		UniquePtr<OutputValue> input = getInput(0);
+		if (!input) return;
+
+		DistanceFieldOutput* df = (DistanceFieldOutput*)input.get();
+
+		WorldEditor& editor = m_editor->m_app.getWorldEditor();
+		Universe* universe = editor.getUniverse();
+		RenderScene* render_scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
+		EntityPtr terrain_entity = getTerrainEntity(m_editor->m_app);
+		if (!terrain_entity) return;
+		const DVec3 terrain_pos = universe->getPosition(*terrain_entity);
+	
+		struct Group {
+			EntityRef e;
+			InstancedModel* im;
+		};
+	
+		StackArray<Group, 64> groups(m_editor->m_app.getAllocator());
+		editor.beginCommandGroup("maps_place_instances");
+		for (const ModelProbability& m : m_models) {
+			const EntityRef e = editor.addEntity();
+			groups.emplace().e = e;
+			editor.makeParent(*terrain_entity, e);
+			editor.addComponent(Span(&e, 1), INSTANCED_MODEL_TYPE);
+			editor.setProperty(INSTANCED_MODEL_TYPE, "", 0, "Model", Span(&e, 1), m.resource->getPath());
+			editor.setEntitiesPositions(&e, &terrain_pos, 1);
+		}
+	
+		for (Group& g : groups) {
+			g.im = &render_scene->beginInstancedModelEditing(g.e);
+		}
+	
+		const double y_base = terrain_pos.y;
+		const Vec2 size = render_scene->getTerrainSize(*terrain_entity);
+		const Vec2 df_to_terrain = size / Vec2((float)df->m_size, (float)df->m_size);
+		const Vec2 terrain_to_df = Vec2((float)df->m_size, (float)df->m_size) / size;
+	
+		float min_dist = FLT_MAX;
+		float max_dist = -FLT_MAX;
+	
+		for (const ModelProbability& prob : m_models) {
+			min_dist = minimum(min_dist, prob.distances.x);
+			max_dist = maximum(max_dist, prob.distances.w);
+		}
+	
+		for (float y = 0; y < df->m_size; y += m_spacing * terrain_to_df.y) {
+			for (float x = 0; x < df->m_size; x += m_spacing * terrain_to_df.x) {
+				float fx = x;
+				float fy = y;
+				fx = clamp(fx + (randFloat() * 0.9f - 0.45f) * m_spacing * terrain_to_df.x, 0.f, (float)df->m_size - 1);
+				fy = clamp(fy + (randFloat() * 0.9f - 0.45f) * m_spacing * terrain_to_df.y, 0.f, (float)df->m_size - 1);
+	
+				DVec3 pos;
+				pos.x = fx * df_to_terrain.x;
+				pos.z = fy * df_to_terrain.y;
+	
+				const i32 idx = i32(fx) + i32(fy) * df->m_size;
+				const float distance = df->m_field[idx];
+				if (distance >= min_dist && distance <= max_dist) {
+					pos.y = render_scene->getTerrainHeightAt(*terrain_entity, (float)pos.x, (float)pos.z);
+	
+					pos.x -= size.x * 0.5f;
+					pos.y += y_base;
+					pos.z -= size.y * 0.5f;
+						
+					const u32 r = getRandomItem(distance, m_models);
+					if (r != 0xffFFffFF) {
+						const Vec2& yoffset_range = m_models[r].y_offset;
+						pos.y += lerp(yoffset_range.x, yoffset_range.y, randFloat());
+	
+						const Vec2& scale_range = m_models[r].scale;
+						const float scale = lerp(scale_range.x, scale_range.y, randFloat());
+						
+						InstancedModel::InstanceData& id = groups[r].im->instances.emplace();
+						const Quat rot(Vec3(0, 1, 0), randFloat() * 2 * PI);
+						id.pos = Vec3(pos - terrain_pos);
+						id.scale = scale;
+						id.rot_quat = rot.w < 0 ? -Vec3(rot.x, rot.y, rot.z) : Vec3(rot.x, rot.y, rot.z);
+						id.lod = 3;
+					}
+				}
+			}
+		}
+	
+		for (Group& g : groups) {
+			render_scene->endInstancedModelEditing(g.e);
+		}
+	
+		editor.endCommandGroup();
+	}
+
+	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override { return {}; }
+
+	bool gui() override {
+		ImGuiEx::BeginNodeTitleBar();
+		ImGui::TextUnformatted("Place instances");
+		ImGui::SameLine();
+		if (ImGui::Button(ICON_FA_PLAY)) run();
+		ImGuiEx::EndNodeTitleBar();
+		
+		inputSlot();
+		bool res = ImGui::DragFloat("Spacing", &m_spacing);
+		if (ImGui::Button("Edit models")) ImGui::OpenPopup("Edit models");
+		if (ImGui::BeginPopup("Edit models")) {
+			for (ModelProbability& mp : m_models) {
+				if (ImGui::TreeNode(&mp, "%d", u32(&mp - m_models.begin()))) {
+					char path[LUMIX_MAX_PATH];
+					copyString(path, mp.resource ? mp.resource->getPath().c_str() : "");
+					if (m_editor->m_app.getAssetBrowser().resourceInput("model", Span(path), Model::TYPE, 150)) {
+						res = true;
+						if (mp.resource) mp.resource->decRefCount();
+						ResourceManagerHub& rm = m_editor->m_app.getEngine().getResourceManager();
+						mp.resource = rm.load<Model>(Path(path));
+					}
+					res = ImGui::DragFloat4("Distances", &mp.distances.x) || res;
+					res = ImGui::DragFloat2("Scale", &mp.scale.x) || res;
+					res = ImGui::DragFloat2("Y Offset", &mp.y_offset.x) || res;
+					res = ImGui::DragFloat("Multiplier", &mp.multiplier) || res;
+					ImGui::TreePop();
+				}
+			}
+			if (ImGui::Button("Add")) {
+				m_models.emplace();
+			}
+			ImGui::EndPopup();
+		}
+		return res;
+	}
+
+	struct ModelProbability {
+		Model* resource = nullptr;
+		Vec4 distances = Vec4(10, 20, 30, 40);
+		Vec2 scale = Vec2(1, 1);
+		Vec2 y_offset = Vec2(0, 0);
+		float multiplier = 1.f;
+	};
+	
+	Array<ModelProbability> m_models;
+	float m_spacing = 5.f;
+};
+
+struct NoiseNode : OSMNodeEditor::Node {
+	NodeType getType() const override { return NodeType::NOISE; }
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
+	void serialize(OutputMemoryStream& blob) override {}
+	void deserialize(InputMemoryStream& blob) override {}
+
+	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
+		if (!getSelectedTerrain(m_editor->m_app)) return {};
+
+		IAllocator& allocator = m_editor->m_app.getAllocator();
+		UniquePtr<MaskOutput> output = UniquePtr<MaskOutput>::create(allocator, allocator);
+		output->m_size = getSplatmapSize(m_editor->m_app);
+		output->m_bitmap.resize(output->m_size * output->m_size);
+		memset(output->m_bitmap.begin(), 0, output->m_bitmap.byte_size());
+		MaskOutput* mask = (MaskOutput*)output.get();
+
+		for (u8& v : mask->m_bitmap) {
+			if (randFloat(0, 1) < m_probability) v = m_value;
+		}
+		return output.move();
+	}
+
+	bool gui() override {
+		nodeTitle("Noise");
+		outputSlot();
+		bool res = ImGui::DragFloat("Probability", &m_probability, 0.01f, 0.f, 1.f);
+		i32 v = m_value;
+		if (ImGui::DragInt("Value", &v, 1, 0, 255)) {
+			m_value = v;
+			res = true;
+		}
+		return res;
+	}
+
+	float m_probability = 0.5f;
+	u8 m_value = 1;
+};
+	
+static stbi_uc* loadTexture(const char* texture, u32& mask_w, u32& mask_h, StudioApp& app) {
+	os::InputFile file;
+	if (!app.getEngine().getFileSystem().open(texture, file)) {
+		logError("Failed to open ", texture);
+		return nullptr;
+	}
+	Array<u8> content(app.getAllocator());
+	content.resize((u32)file.size());
+	if (!file.read(content.begin(), content.byte_size())) {
+		logError("Failed to read ", texture);
+		file.close();
+		return nullptr;
+	}
+	file.close();
+
+	int w, h, ch;
+	stbi_uc* rgba = stbi_load_from_memory(content.begin(), content.byte_size(), &w, &h, &ch, 1);
+	if (!rgba) {
+		logError("Failed to parse ", texture);
+		return nullptr;
+	}
+	mask_w = w;
+	mask_h = h;
+	return rgba;
+}
+	
+struct MaskTextureNode : OSMNodeEditor::Node {
+	NodeType getType() const override { return NodeType::MASK_TEXTURE; }
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
+	
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(m_ref);
+		blob.write(m_mask_scale);
+		blob.writeString(m_texture);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(m_ref);
+		blob.read(m_mask_scale);
+		m_texture = blob.readString();
+	}
+
+	static float sampleMask(const u8* mask, Vec2 uv, IVec2 size) {
+		const u32 w = size.x;
+		const u32 h = size.y;
+		const float a = fmodf(uv.x, float(w - 1));
+		const float b = fmodf(uv.y, float(h - 1));
+		
+		u32 a0 = u32(a);
+		u32 b0 = u32(b);
+		const float tx = a - a0;
+		const float ty = b - b0;
+		a0 = a0 % w;
+		b0 = b0 % h;
+
+		const float v00 = mask[a0 + b0 * w] / float(0xff);
+		const float v10 = mask[a0 + 1 + b0 * w] / float(0xff);
+		const float v11 = mask[a0 + 1 + b0 * w + w] / float(0xff);
+		const float v01 = mask[a0 + b0 * w + w] / float(0xff);
+
+		return lerp(
+			lerp(v00, v10, tx),
+			lerp(v01, v11, tx),
+			ty
+		);
+	};
+	
+	void maskTexture(MaskOutput* output) const {
+		u32 mask_w, mask_h;
+		stbi_uc* mask = loadTexture(m_texture, mask_w, mask_h, m_editor->m_app);
+		if (!mask) {
+			logError("Failed to load ", m_texture);
+			return;
+		}
+
+		u8* out = output->m_bitmap.begin();
+		const Vec2 rand_offset(randFloat(0, float(mask_w)), randFloat(0, float(mask_h)));
+		for (u32 j = 0; j < output->m_size; ++j) {
+			for (u32 i = 0; i < output->m_size; ++i) {
+				const float k = fmodf(rand_offset.x + i * m_mask_scale, (float)mask_w);
+				const float l = fmodf(rand_offset.y + j * m_mask_scale, (float)mask_h);
+				u8& m = out[i + j * output->m_size]; 
+				m = sampleMask(mask, Vec2(k, l), IVec2(mask_w, mask_h)) > m_ref ? 0xff : m;
+			}
+		}
+		stbi_image_free(mask);
+	}
+	
+	bool gui() override {
+		char basename[LUMIX_MAX_PATH];
+		copyString(Span(basename), Path::getBasename(m_texture));
+		if (ImGui::Button(basename)) m_show_open = true;
+		bool res = ImGui::DragFloat("Ref value", &m_ref, 0.01f, 0.f, 1.f);
+		res = ImGui::DragFloat("Mask scale", &m_mask_scale, 0.01f, FLT_MIN, FLT_MAX) || res;
+		if (ImGuiEx::IconButton(ICON_FA_TIMES, "Clear")) {
+			m_texture = "";
+			res = true;
+		}
+		FileSelector& fs = m_editor->m_app.getFileSelector();
+		if (fs.gui("Select mask texture", &m_show_open, "tga", false)) {
+			m_texture = fs.getPath();
+			res = true;
+		}
+		return res;
+	}
+	
+	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
+		IAllocator& allocator = m_editor->m_app.getAllocator();
+		UniquePtr<MaskOutput> output = UniquePtr<MaskOutput>::create(allocator, allocator);
+		output->m_size = getSplatmapSize(m_editor->m_app);
+		output->m_bitmap.resize(output->m_size * output->m_size);
+		maskTexture(output.get());
+		return output.move();
+	}
+
+	StaticString<LUMIX_MAX_PATH> m_texture;
+	float m_ref = 0.f;
+	float m_mask_scale = 1.f;
+	bool m_show_open = false;
+};
+
+struct InvertNode : OSMNodeEditor::Node {
+	NodeType getType() const override { return NodeType::INVERT; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return true; }
+	void serialize(OutputMemoryStream& blob) override {}
+	void deserialize(InputMemoryStream& blob) override {}
+
+	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
+		UniquePtr<OutputValue> input = getInput(0);
+		if (!input) return {};
+		if (input->getType() != OutputType::MASK) return {};
+		MaskOutput* mask = (MaskOutput*)input.get();
+
+		for (u8& v : mask->m_bitmap) v = v ? 0 : 1;
+		return input.move();
+	}
+
+	bool gui() override {
+		nodeTitle("Invert");
+		inputSlot();
+		outputSlot();
+		ImGui::TextUnformatted(" ");
+		return false;
+	}
 };
 
 struct ShrinkMaskNode : OSMNodeEditor::Node {
 	NodeType getType() const override { return NodeType::SHRINK_MASK; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return true; }
+
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(m_iterations);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(m_iterations);
+	}
+
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
-		const Input input = getInput(0);
-		if (!input) return {};
-		UniquePtr<OutputValue> input_value = input.node->getOutputValue(input.output_idx);
+		UniquePtr<OutputValue> input_value = getInput(0);
+		if (!input_value) return {};
 		if (input_value->getType() != OutputType::MASK) return {};
 		MaskOutput* mask = (MaskOutput*)input_value.get();
 
@@ -1108,7 +2141,7 @@ struct ShrinkMaskNode : OSMNodeEditor::Node {
 		output->m_bitmap.resize(mask->m_bitmap.size());
 
 
-		for (u32 iter = 0; iter < iterations; ++iter) {
+		for (u32 iter = 0; iter < m_iterations; ++iter) {
 			Array<u8>& a = iter % 2 == 0 ? output->m_bitmap : mask->m_bitmap;
 			Array<u8>& b = iter % 2 == 0 ? mask->m_bitmap : output->m_bitmap;
 			auto get = [&](i32 i, i32 j){
@@ -1134,7 +2167,7 @@ struct ShrinkMaskNode : OSMNodeEditor::Node {
 				}
 			}
 		}
-		if (iterations % 2 == 0) {
+		if (m_iterations % 2 == 0) {
 			return input_value.move();
 		}
 
@@ -1142,13 +2175,13 @@ struct ShrinkMaskNode : OSMNodeEditor::Node {
 	}
 
 	bool gui() override {
-		ImGuiEx::NodeTitle("Shrink mask");
+		nodeTitle("Shrink mask");
 		inputSlot();
 		outputSlot();
-		return ImGui::DragInt("Iterations", (i32*)&iterations, 1, 0, 999999);
+		return ImGui::DragInt("Iterations", (i32*)&m_iterations, 1, 0, 999999);
 	}
 
-	u32 iterations = 1;
+	u32 m_iterations = 1;
 };
 
 struct PaintGroundNode : OSMNodeEditor::Node {
@@ -1156,13 +2189,19 @@ struct PaintGroundNode : OSMNodeEditor::Node {
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return false; }
 
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(m_ground);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(m_ground);
+	}
+
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override { ASSERT(false); return {nullptr, nullptr}; }
 
 	bool run() {
-		const Input input = getInput(0);
-		if (!input) return false;
-		const UniquePtr<OutputValue> val = input.node->getOutputValue(input.output_idx);
-		if (!val.get()) return false;
+		const UniquePtr<OutputValue> val = getInput(0);
+		if (!val) return false;
 		if (val->getType() != OutputType::MASK) return false;
 		const MaskOutput* mask = (MaskOutput*)val.get();
 
@@ -1244,38 +2283,19 @@ struct MaskBaseNode : OSMNodeEditor::Node {
 		return tmp;
 	}
 
-	u32 getSize() const {
-		const Terrain* terrain = getSelectedTerrain(m_editor->m_app);
-		if (!terrain) return 1024;
-		Texture* splatmap = terrain->getSplatmap();
-		if (!splatmap || !splatmap->isReady()) return 1024;
-		return splatmap->width;
-	}
-
 	UniquePtr<MaskOutput> createOutput() {
 		if (!getSelectedTerrain(m_editor->m_app)) return {};
-		UniquePtr<MaskOutput> output;
-		const Input input = getInput(0);
-		if (input) {
-			UniquePtr<OutputValue> input_value = input.node->getOutputValue(input.output_idx);
-			if (input_value->getType() != OutputType::MASK) return {};
-			return input_value.move();
-		}
-
-		if (m_unmask) return {};
 
 		IAllocator& allocator = m_editor->m_app.getAllocator();
-		output = UniquePtr<MaskOutput>::create(allocator, allocator);
-		output->m_size = getSize();
+		UniquePtr<MaskOutput> output = UniquePtr<MaskOutput>::create(allocator, allocator);
+		output->m_size = getSplatmapSize(m_editor->m_app);
 		output->m_bitmap.resize(output->m_size * output->m_size);
 		memset(output->m_bitmap.begin(), 0, output->m_bitmap.byte_size());
 		return output.move();
 	}
 
 	bool commonGUI() {
-		inputSlot();
 		outputSlot();
-		ImGui::TextUnformatted("Input mask");
 		const char* values[] = {
 			"\0landuse",
 			"forest\0landuse",
@@ -1301,14 +2321,11 @@ struct MaskBaseNode : OSMNodeEditor::Node {
 			"tree_row\0natural",
 			"stream\0waterway",
 		};
-		bool res = tagInput(Span(m_key.data), Span(m_value.data), Span(values), 150);
-		res = ImGui::Checkbox("Unmask", &m_unmask) || res;
-		return res;
+		return tagInput(Span(m_key.data), Span(m_value.data), Span(values), 150);
 	}
 
 	StaticString<128> m_key;
 	StaticString<128> m_value;
-	bool m_unmask = false;
 };
 
 struct MaskPolylinesNode : MaskBaseNode {
@@ -1316,18 +2333,24 @@ struct MaskPolylinesNode : MaskBaseNode {
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return true; }
 
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(m_width);
+		blob.write(m_key);
+		blob.write(m_value);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(m_width);
+		blob.read(m_key);
+		blob.read(m_value);
+	}
+
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
 		StudioApp& app = m_editor->m_app;
 		Array<DVec2> polyline(app.getAllocator());
 		UniquePtr<MaskOutput> output = createOutput();
 		if (!output.get()) return output;
 
-		Array<u8> tmp_bitmap(m_editor->m_app.getAllocator());
-		if (m_unmask) {
-			tmp_bitmap.resize(output->m_size * output->m_size);
-			memset(tmp_bitmap.begin(), 0, tmp_bitmap.byte_size());
-		}
-		Array<u8>& bitmap = m_unmask ? tmp_bitmap : output->m_bitmap;
 		for (pugi::xml_node& w : m_editor->m_osm_parser.m_ways) {
 			if (!OSMParser::hasTag(w, m_key, m_value)) continue;
 
@@ -1341,30 +2364,14 @@ struct MaskPolylinesNode : MaskBaseNode {
 				const DVec2 c = toBitmap(polyline[i + 1] - n + dir, output->m_size);
 				const DVec2 d = toBitmap(polyline[i] - n - dir, output->m_size);
 				const Vec2 vecs[] = {Vec2(a), Vec2(b), Vec2(c), Vec2(d), Vec2(a)};
-				raster(Span(vecs), output->m_size, 1, bitmap);
+				raster(Span(vecs), output->m_size, 1, output->m_bitmap);
 			}
 		}
-
-		if (m_unmask) {
-			for (u32 i = 0; i < (u32)tmp_bitmap.size(); ++i) {
-				if (tmp_bitmap[i]) output->m_bitmap[i] = 0;
-			}
-		}
-
 		return output.move();
 	}
 
 	bool gui() override {
-		ImGuiEx::BeginNodeTitleBar();
-		ImGui::TextUnformatted("Mask polylines");
-		EntityPtr terrain = getTerrain(m_editor->m_app);
-		if (terrain.isValid()) {
-			ImGui::SameLine();
-			if (ImGui::Button(ICON_FA_CHART_LINE " Visualize")) {
-				m_editor->m_osm_parser.showPolylines(m_key, m_value, *terrain, m_editor->m_debug_tris);
-			}
-		}
-		ImGuiEx::EndNodeTitleBar();
+		nodeTitle("Mask polylines");
 		bool res = commonGUI();
 		res = ImGui::DragFloat("Width", &m_width, 0.1f, FLT_MIN, FLT_MAX) || res;
 		return res;
@@ -1375,8 +2382,18 @@ struct MaskPolylinesNode : MaskBaseNode {
 
 struct MaskPolygonsNode : MaskBaseNode {
 	NodeType getType() const override { return NodeType::MASK_POLYGONS; }
-	bool hasInputPins() const override { return true; }
+	bool hasInputPins() const override { return false; }
 	bool hasOutputPins() const override { return true; }
+
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(m_key);
+		blob.write(m_value);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(m_key);
+		blob.read(m_value);
+	}
 
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
 		StudioApp& app = m_editor->m_app;
@@ -1385,13 +2402,6 @@ struct MaskPolygonsNode : MaskBaseNode {
 
 		UniquePtr<MaskOutput> output = createOutput();
 		if (!output.get()) return output;
-
-		Array<u8> tmp_bitmap(m_editor->m_app.getAllocator());
-		if (m_unmask) {
-			tmp_bitmap.resize(output->m_size * output->m_size);
-			memset(tmp_bitmap.begin(), 0, tmp_bitmap.byte_size());
-		}
-		Array<u8>& bitmap = m_unmask ? tmp_bitmap : output->m_bitmap;
 
 		Multipolygon2D multipolygon(app.getAllocator());
 		for (pugi::xml_node& r : m_editor->m_osm_parser.m_relations) {
@@ -1405,7 +2415,7 @@ struct MaskPolygonsNode : MaskBaseNode {
 					const DVec2 tmp = toBitmap(p, output->m_size);
 					points.push(Vec2(tmp));
 				}
-				raster(points, output->m_size, 1, bitmap);
+				raster(points, output->m_size, 1, output->m_bitmap);
 			}
 			
 			for (const Polygon2D& poly : multipolygon.inner_polygons) {
@@ -1414,7 +2424,7 @@ struct MaskPolygonsNode : MaskBaseNode {
 					DVec2 tmp = toBitmap(p, output->m_size);
 					points.push(Vec2(tmp));
 				}
-				raster(points, output->m_size, -1, bitmap);
+				raster(points, output->m_size, -1, output->m_bitmap);
 			}
 		}
 
@@ -1429,29 +2439,14 @@ struct MaskPolygonsNode : MaskBaseNode {
 				DVec2 tmp = toBitmap(p, output->m_size);
 				points.push(Vec2(tmp));
 			}
-			raster(points, output->m_size, 1, bitmap);
-		}
-
-		if (m_unmask) {
-			for (u32 i = 0; i < (u32)tmp_bitmap.size(); ++i) {
-				if (tmp_bitmap[i]) output->m_bitmap[i] = 0;
-			}
+			raster(points, output->m_size, 1, output->m_bitmap);
 		}
 
 		return output.move();
 	}
 
 	bool gui() override {
-		ImGuiEx::BeginNodeTitleBar();
-		ImGui::TextUnformatted("Mask polygons");
-		EntityPtr terrain = getTerrain(m_editor->m_app);
-		if (terrain.isValid()) {
-			ImGui::SameLine();
-			if (ImGui::Button(ICON_FA_CHART_LINE " Visualize")) {
-				m_editor->m_osm_parser.showAreas(m_key, m_value, *terrain, m_editor->m_debug_tris);
-			}
-		}
-		ImGuiEx::EndNodeTitleBar();
+		nodeTitle("Mask polygons");
 		return commonGUI();
 	}
 
@@ -1462,6 +2457,12 @@ void OSMNodeEditor::run() {
 
 	for (Node* node : m_nodes) {
 		switch (node->getType()) {
+			case NodeType::GRASS:
+				((GrassNode*)node)->run();
+				break;
+			case NodeType::PLACE_INSTANCES:
+				((PlaceInstancesNode*)node)->run();
+				break;
 			case NodeType::PAINT_GROUND:
 				((PaintGroundNode*)node)->run();
 				break;
@@ -1479,6 +2480,13 @@ OSMNodeEditor::Node* OSMNodeEditor::addNode(NodeType type, ImVec2 pos, bool save
 		case NodeType::PAINT_GROUND: node = LUMIX_NEW(m_allocator, PaintGroundNode); break;
 		case NodeType::GROW_MASK: node = LUMIX_NEW(m_allocator, GrowMaskNode); break;
 		case NodeType::SHRINK_MASK: node = LUMIX_NEW(m_allocator, ShrinkMaskNode); break;
+		case NodeType::INVERT: node = LUMIX_NEW(m_allocator, InvertNode); break;
+		case NodeType::GRASS: node = LUMIX_NEW(m_allocator, GrassNode); break;
+		case NodeType::NOISE: node = LUMIX_NEW(m_allocator, NoiseNode); break;
+		case NodeType::MASK_TEXTURE: node = LUMIX_NEW(m_allocator, MaskTextureNode); break;
+		case NodeType::MERGE_MASKS: node = LUMIX_NEW(m_allocator, MergeMasksNode); break;
+		case NodeType::DISTANCE_FIELD: node = LUMIX_NEW(m_allocator, DistanceFieldNode); break;
+		case NodeType::PLACE_INSTANCES: node = LUMIX_NEW(m_allocator, PlaceInstancesNode)(m_allocator); break;
 	}
 	node->m_editor = this;
 	node->m_pos = pos;
@@ -1503,23 +2511,6 @@ struct TileLoc {
 	int x, y, z;
 };
 
-double long2tilex(double long lon, int z) {
-	return (lon + 180) * (1 << z) / 360.0;
-}
-
-double tilex2long(double x, int z) {
-	return x / pow(2.0, z) * 360.0 - 180;
-}
-
-double lat2tiley(double lat, int z) { 
-    const double latrad = lat * PI / 180.0;
-	return (1.0 - asinh(tan(latrad)) / PI) / 2.0 * (1 << z); 
-}
-
-double tiley2lat(double y, int z) {
-	double n = PI - 2.0 * PI * y / pow(2.0, z);
-	return 180.0 / PI * atan(0.5 * (exp(n) - exp(-n)));
-}
 
 constexpr int TILE_SIZE = 256;
 constexpr int MAX_ZOOM = 18;
@@ -1751,7 +2742,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		, m_in_progress(app.getAllocator())
 		, m_queue(app.getAllocator())
 		, m_bitmap(app.getAllocator())
-		, m_tmp_bitmap(app.getAllocator())
 		, m_osm_editor(app)
 	{
 		#ifdef _WIN32
@@ -1769,34 +2759,33 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	}
 	
 	void onBeforeSettingsSaved() override {
-		m_app.getSettings().setValue(Settings::GLOBAL, "is_maps_plugin_open", m_open);
-		m_app.getSettings().setValue(Settings::LOCAL, "maps_x", m_x);
-		m_app.getSettings().setValue(Settings::LOCAL, "maps_y", m_y);
-		m_app.getSettings().setValue(Settings::LOCAL, "maps_scale", m_scale);
-		m_app.getSettings().setValue(Settings::LOCAL, "maps_resample", m_resample_hm);
-		m_app.getSettings().setValue(Settings::LOCAL, "maps_zoom", m_zoom);
-		m_app.getSettings().setValue(Settings::LOCAL, "maps_offset_x", m_pixel_offset.x);
-		m_app.getSettings().setValue(Settings::LOCAL, "maps_offset_y", m_pixel_offset.y);
-		m_app.getSettings().setValue(Settings::LOCAL, "maps_size", m_size);
-		m_app.getSettings().setValue(Settings::LOCAL, "maps_osm_area_edge", m_area_edge);
+		Settings& settings = m_app.getSettings();
+		settings.setValue(Settings::GLOBAL, "is_maps_plugin_open", m_open);
+		settings.setValue(Settings::LOCAL, "maps_x", m_x);
+		settings.setValue(Settings::LOCAL, "maps_y", m_y);
+		settings.setValue(Settings::LOCAL, "maps_scale", m_scale);
+		settings.setValue(Settings::LOCAL, "maps_resample", m_resample_hm);
+		settings.setValue(Settings::LOCAL, "maps_zoom", m_zoom);
+		settings.setValue(Settings::LOCAL, "maps_offset_x", m_pixel_offset.x);
+		settings.setValue(Settings::LOCAL, "maps_offset_y", m_pixel_offset.y);
+		settings.setValue(Settings::LOCAL, "maps_size", m_size);
+		settings.setValue(Settings::LOCAL, "maps_osm_area_edge", m_osm_editor.m_area_edge);
+		m_osm_editor.onBeforeSettingsSaved(settings);
 	}
 
 	void onSettingsLoaded() override {
-		m_open = m_app.getSettings().getValue(Settings::GLOBAL, "is_maps_plugin_open", false);
-		m_x = m_app.getSettings().getValue(Settings::LOCAL, "maps_x", 0);
-		m_y = m_app.getSettings().getValue(Settings::LOCAL, "maps_y", 0);
-		m_scale = m_app.getSettings().getValue(Settings::LOCAL, "maps_scale", 1.f);
-		m_area_edge = m_app.getSettings().getValue(Settings::LOCAL, "maps_osm_area_edge", 0);
-		m_resample_hm = m_app.getSettings().getValue(Settings::LOCAL, "maps_resample", 1);
-		m_zoom = m_app.getSettings().getValue(Settings::LOCAL, "maps_zoom", 1);
-		m_pixel_offset.x = m_app.getSettings().getValue(Settings::LOCAL, "maps_offset_x", 0);
-		m_pixel_offset.y = m_app.getSettings().getValue(Settings::LOCAL, "maps_offset_y", 0);
-		m_size = m_app.getSettings().getValue(Settings::LOCAL, "maps_size", 1);
-		const u32 len = m_app.getSettings().getValue(Settings::LOCAL, "maps_script", Span(m_script));
-		if (len == 0) m_script[0] = '\0';
-		if (len >= lengthOf(m_script)) {
-			logWarning("Map script saved in settings is too long");
-		}
+		Settings& settings = m_app.getSettings();
+		m_open = settings.getValue(Settings::GLOBAL, "is_maps_plugin_open", false);
+		m_x = settings.getValue(Settings::LOCAL, "maps_x", 0);
+		m_y = settings.getValue(Settings::LOCAL, "maps_y", 0);
+		m_scale = settings.getValue(Settings::LOCAL, "maps_scale", 1.f);
+		m_osm_editor.m_area_edge = settings.getValue(Settings::LOCAL, "maps_osm_area_edge", 0);
+		m_resample_hm = settings.getValue(Settings::LOCAL, "maps_resample", 1);
+		m_zoom = settings.getValue(Settings::LOCAL, "maps_zoom", 1);
+		m_pixel_offset.x = settings.getValue(Settings::LOCAL, "maps_offset_x", 0);
+		m_pixel_offset.y = settings.getValue(Settings::LOCAL, "maps_offset_y", 0);
+		m_size = settings.getValue(Settings::LOCAL, "maps_size", 1);
+		m_osm_editor.onSettingsLoaded(settings);
 	}
 
 	~MapsPlugin()
@@ -1807,11 +2796,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			WSACleanup();
 		#endif
 		clear();
-	}
-
-
-	void parseOSMData(double left, double bottom, double right, double top, float scale) {
-		m_osm_editor.m_osm_parser.parseOSM(left, bottom, right, top, scale);
 	}
 
 	void finishAllTasks()
@@ -1890,13 +2874,13 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		RenderInterface* ri = m_app.getRenderInterface();
 		if (ri) {
 			for (TileData* tile : m_tiles) {
-				m_app.getRenderInterface()->destroyTexture(tile->imagery);
-				m_app.getRenderInterface()->destroyTexture(tile->hm);
+				ri->destroyTexture(tile->imagery);
+				ri->destroyTexture(tile->hm);
 				
 			}
 			for (TileData* tile : m_cache) {
-				m_app.getRenderInterface()->destroyTexture(tile->imagery);
-				m_app.getRenderInterface()->destroyTexture(tile->hm);
+				ri->destroyTexture(tile->imagery);
+				ri->destroyTexture(tile->hm);
 				LUMIX_DELETE(allocator, tile);
 			}
 		}
@@ -1941,7 +2925,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 		
 		WorldEditor& editor = m_app.getWorldEditor();
-		RenderInterface* ri = m_app.getRenderInterface();
 		IAllocator& allocator = editor.getEngine().getAllocator();
 		TileData& tile = *m_tiles.emplace(LUMIX_NEW(allocator, TileData)(loc.x, loc.y, loc.z, allocator));
 		
@@ -2016,11 +2999,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	}
 
-	bool browse()
-	{
-		return os::getSaveFilename(Span(m_out_path), "Raw Image\0*.raw\0", "raw");
-	}
-
 	void createMapEntity() {
 		const double lat = double(tiley2lat(double(m_y + (1 << (m_size - 1))), m_zoom));
 		const double width = m_scale * 256 * (1 << m_size) * 156543.03 * cos(degreesToRadians(lat)) / (1 << m_zoom);
@@ -2029,13 +3007,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		editor.addComponent(Span(&e, 1), TERRAIN_TYPE);
 		const PathInfo file_info(m_out_path);
 		StaticString<LUMIX_MAX_PATH> mat_path(file_info.m_dir, "/", file_info.m_basename, ".mat");
-		char rel_mat_path[LUMIX_MAX_PATH];
 		
-		FileSystem& fs = editor.getEngine().getFileSystem();
-		if (!fs.makeRelative(Span(rel_mat_path), mat_path)) {
-			logError("Can not load ", mat_path, " because it's not in root directory (", fs.getBasePath(), ").");
-		}
-		editor.setProperty(TERRAIN_TYPE, "", -1, "Material", Span(&e, 1), Path(rel_mat_path));
+		editor.setProperty(TERRAIN_TYPE, "", -1, "Material", Span(&e, 1), Path(mat_path));
 
 		const float scale = float(width / ((1 << m_size) * 256));
 		editor.setProperty(TERRAIN_TYPE, "", -1, "XZ scale", Span(&e, 1), scale / m_resample_hm);
@@ -2633,8 +3606,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			tex->onDataUpdated(0, 0, w, h);
 		}
 	}
-    
+
+	bool hasFocus() override { return m_has_focus; }
+	
 	void onWindowGUI() override {
+		m_has_focus = false;
 		while (!m_queue.empty() && m_in_progress.size() < 8) {
 			MapsTask* task = m_queue.back();
 			m_queue.pop();
@@ -2649,6 +3625,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			ImGui::End();
 			return;
 		}
+		m_has_focus = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 
 		if (ImGui::BeginTabBar("tabs")) {
 			if (ImGui::BeginTabItem("Map")) {
@@ -2656,7 +3633,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				ImGui::EndTabItem();
 			}
 			if (ImGui::BeginTabItem("OSM")) {
-				OSMGUI();
+				m_osm_editor.gui(m_x, m_y, m_pixel_offset, m_zoom, m_scale, m_size);
 				ImGui::EndTabItem();
 			}
 			if (ImGui::BeginTabItem("Erosion")) {
@@ -2693,183 +3670,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			LuaWrapper::checkField(L, 1, "inverted", &inverted);
 		}
 	};
-
-	void shrinkMask() {
-		auto get = [&](i32 i, i32 j){
-			if (i < 0) return false;
-			if (i >= (i32)m_bitmap_size) return false;
-			if (j < 0) return false;
-			if (j >= (i32)m_bitmap_size) return false;
-
-			return m_bitmap[i +  j * m_bitmap_size] != 0;
-		};
-
-		for (i32 j = 0; j < (i32)m_bitmap_size; ++j) {
-			for (i32 i = 0; i < (i32)m_bitmap_size; ++i) {
-				m_tmp_bitmap[i + j * m_bitmap_size] = 
-					(get(i, j)
-					&& get(i + 1, j)
-					&& get(i - 1, j)
-					&& get(i, j - 1)
-					&& get(i + 1, j - 1)
-					&& get(i - 1, j - 1)
-					&& get(i, j + 1)
-					&& get(i + 1, j + 1)
-					&& get(i - 1, j + 1)) ? 1 : 0;
-			}
-		}
-
-		for (u32 i = 0; i < m_bitmap_size * m_bitmap_size; ++i) {
-			m_bitmap[i] = m_tmp_bitmap[i];
-		}
-	}
-
-	void growMask() {
-		auto get = [&](i32 i, i32 j){
-			if (i < 0) return false;
-			if (i >= (i32)m_bitmap_size) return false;
-			if (j < 0) return false;
-			if (j >= (i32)m_bitmap_size) return false;
-
-			return m_bitmap[i +  j * m_bitmap_size] != 0;
-		};
-
-		for (i32 j = 0; j < (i32)m_bitmap_size; ++j) {
-			for (i32 i = 0; i < (i32)m_bitmap_size; ++i) {
-				m_tmp_bitmap[i + j * m_bitmap_size] = 
-					(get(i, j)
-					|| get(i + 1, j)
-					|| get(i - 1, j)
-					|| get(i, j - 1)
-					|| get(i + 1, j - 1)
-					|| get(i - 1, j - 1)
-					|| get(i, j + 1)
-					|| get(i + 1, j + 1)
-					|| get(i - 1, j + 1)) ? 1 : 0;
-			}
-		}
-
-		for (u32 i = 0; i < m_bitmap_size * m_bitmap_size; ++i) {
-			m_bitmap[i] = m_tmp_bitmap[i];
-		}
-	}
-
-	void noise(float probability, u8 value) {
-		for (u8& v : m_bitmap) {
-			if (randFloat(0, 1) < probability) v = value;
-		}
-	}
-
-	void invertMask() {
-		for (u8& v : m_bitmap) {
-			v = v == 0;
-		}
-	}
-
-	void clearMask(u32 size) {
-		m_bitmap.resize(size * size);
-		m_tmp_bitmap.resize(size * size);
-		memset(m_bitmap.begin(), 0, m_bitmap.byte_size());
-		m_bitmap_size = size;
-	}
-
-	void maskPolygons(lua_State* L) {
-		const WayDef def(L);
-		rasterPolygons(def, true, L);
-	}
-
-	void unmaskPolygons(lua_State* L) {
-		const WayDef def(L);
-		rasterPolygons(def, false, L);
-	}
-
-	void rasterPolygons(const WayDef& def, bool mask, lua_State* L) {
-		/*const Terrain* terrain = getSelectedTerrain();
-		if (!terrain) luaL_error(L, "no terrain is selected");
-
-		Array<DVec2> polygon(m_app.getAllocator());
-		Array<Vec2> points(m_app.getAllocator());
-		
-		Array<u8>& bitmap = !def.inverted && mask ? m_bitmap : m_tmp_bitmap;
-		if (def.inverted || !mask) {
-			memset(m_tmp_bitmap.begin(), 0, m_tmp_bitmap.byte_size());
-		}
-
-		Multipolygon2D multipolygon(m_app.getAllocator());
-		for (pugi::xml_node& r : m_osm_parser.m_relations) {
-			if (!OSMParser::hasTag(r, def.key, def.value)) continue;
-			
-			m_osm_parser.getMultipolygon(r, multipolygon);
-
-			for (const Polygon2D& poly : multipolygon.outer_polygons) {
-				points.clear();
-				for (const DVec2 p : poly) {
-					const DVec2 tmp = toBitmap(p);
-					points.push(Vec2(tmp));
-				}
-				raster(points, m_bitmap_size, 1, bitmap);
-			}
-			
-			for (const Polygon2D& poly : multipolygon.inner_polygons) {
-				points.clear();
-				for (const DVec2 p : poly) {
-					DVec2 tmp = toBitmap(p);
-					points.push(Vec2(tmp));
-				}
-				raster(points, m_bitmap_size, -1, bitmap);
-			}
-		}
-
-		for (pugi::xml_node& w : m_osm_parser.m_ways) {
-			if (!OSMParser::hasTag(w, def.key, def.value)) continue;
-
-			polygon.clear();
-			points.clear();
-			m_osm_parser.getWay(w, polygon);
-
-			for (const DVec2 p : polygon) {
-				DVec2 tmp = toBitmap(p);
-				points.push(Vec2(tmp));
-			}
-			raster(points, m_bitmap_size, 1, bitmap);
-		}
-
-		if (def.inverted) {
-			if (mask) {
-				for (u32 i = 0, c = m_bitmap_size * m_bitmap_size; i < c; ++i) {
-					if (m_tmp_bitmap[i] == 0) m_bitmap[i] = 1;
-				}
-			}
-			else {
-				for (u32 i = 0, c = m_bitmap_size * m_bitmap_size; i < c; ++i) {
-					if (m_tmp_bitmap[i] == 0) m_bitmap[i] = 0;
-				}
-			}
-		}
-		else if (!mask) {
-			for (u32 i = 0, c = m_bitmap_size * m_bitmap_size; i < c; ++i) {
-				if (m_tmp_bitmap[i] == 1) m_bitmap[i] = 0;
-			}
-		}*/
-	}
-
-	void maskPolylines(lua_State* L) {
-		if (!getSelectedTerrain()) return;
-
-		const WayDef def(L);
-		float width = 1;
-		LuaWrapper::getOptionalField<float>(L, 1, "width", &width);
-		rasterPolylines(1, def, width);
-	}
-
-	void unmaskPolylines(lua_State* L) {
-		if (!getSelectedTerrain()) return;
-
-		const WayDef def(L);
-		float width = 1;
-		LuaWrapper::getOptionalField<float>(L, 1, "width", &width);
-		rasterPolylines(-1, def, width);
-	}
 
 	struct Tri2D {
 		Vec2 points[3];
@@ -3216,45 +4016,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 #endif
 	}
 
-	void rasterPolylines(i32 change, const WayDef& def, float width) {
-#if 0
-		Array<DVec2> polyline(m_app.getAllocator());
-		
-		for (pugi::xml_node& w : m_osm_parser.m_ways) {
-			if (!OSMParser::hasTag(w, def.key, def.value)) continue;
-
-			polyline.clear();
-			m_osm_parser.getWay(w, polyline);
-			for (i32 i = 0; i < polyline.size() - 1; ++i) {
-				const DVec2 dir = normalize(polyline[i + 1] - polyline[i]) * 0.5 * double(width);
-				const DVec2 n = DVec2(dir.y, -dir.x);
-				const DVec2 a = toBitmap(polyline[i] + n - dir);
-				const DVec2 b = toBitmap(polyline[i + 1] + n + dir);
-				const DVec2 c = toBitmap(polyline[i + 1] - n + dir);
-				const DVec2 d = toBitmap(polyline[i] - n - dir);
-				const Vec2 vecs[] = {Vec2(a), Vec2(b), Vec2(c), Vec2(d), Vec2(a)};
-				raster(Span(vecs), m_bitmap_size, change, m_bitmap);
-			}
-		}
-#endif
-/*
-		if (frome.isValid()) {
-			DVec2 fep = m_app.getWorldEditor().getUniverse()->getPosition((EntityRef)frome).xz();
-			DVec2 tep = m_app.getWorldEditor().getUniverse()->getPosition((EntityRef)toe).xz();
-
-			const DVec2 dir = normalize(fep - tep)  * 0.5 * double(width);
-			const DVec2 n = DVec2(dir.y, -dir.x);
-			const DVec2 aq = toBitmap(tep) + DVec2(xx, yy);
-			const DVec2 aw = toBitmap(fep) + DVec2(xx, yy);
-			const DVec2 a = toBitmap(tep + n - dir) + DVec2(xx, yy);
-			const DVec2 b = toBitmap(fep + n + dir) + DVec2(xx, yy);
-			const DVec2 c = toBitmap(fep - n + dir) + DVec2(xx, yy);
-			const DVec2 d = toBitmap(tep - n - dir) + DVec2(xx, yy);
-			const Vec2 vecs[] = {Vec2(a), Vec2(b), Vec2(c), Vec2(d), Vec2(a)};
-			raster(Span(vecs), m_bitmap_size, change, m_bitmap);
-		}	*/
-	}
-
 	void getPrefabs(lua_State* L, i32 idx, const char* key, Array<PrefabResource*>& prefabs) {
 		const int type = LuaWrapper::getField(L, idx, key);
 		if (type == LUA_TNIL) luaL_error(L, "missing `%s`", key);
@@ -3380,134 +4141,10 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		editor.endCommandGroup();
 #endif
 	}
-
-	template <typename T>
-	static u32 getRandomItem(float distance, const Array<T>& probs) {
-		float sum = 0;
-
-		auto get = [](float distance, const T& prob){
-			if (distance < prob.distances.x) return 0.f;
-			if (distance > prob.distances.w) return 0.f;
-			
-			if (distance < prob.distances.y) {
-				return prob.multiplier * (distance - prob.distances.x) / (prob.distances.y - prob.distances.x);
-			}
-			else if (distance < prob.distances.z) {
-				return prob.multiplier;
-			}
-			return prob.multiplier * (1 - (distance - prob.distances.z) / (prob.distances.w - prob.distances.z));
-		};
-
-		for (const T& prob : probs) {
-			sum += get(distance, prob);
-		}
-		if (sum == 0) return 0;
-		
-		float r = randFloat() * sum;
-
-		for (i32 i = 0; i < probs.size(); ++i) {
-			const T& prob = probs[i];
-			float p = get(distance, prob);
-			if (r < p) return i;
-			r -= p;
-		}
-		
-		ASSERT(false);
-		return 0;
-	}
-
-	static float sampleMask(const u8* mask, Vec2 uv, IVec2 size) {
-		const u32 w = size.x;
-		const u32 h = size.y;
-		const float a = fmodf(uv.x, float(w - 1));
-		const float b = fmodf(uv.y, float(h - 1));
-		
-		u32 a0 = u32(a);
-		u32 b0 = u32(b);
-		const float tx = a - a0;
-		const float ty = b - b0;
-		a0 = a0 % w;
-		b0 = b0 % h;
-
-		const float v00 = mask[a0 + b0 * w] / float(0xff);
-		const float v10 = mask[a0 + 1 + b0 * w] / float(0xff);
-		const float v11 = mask[a0 + 1 + b0 * w + w] / float(0xff);
-		const float v01 = mask[a0 + b0 * w + w] / float(0xff);
-
-		return lerp(
-			lerp(v00, v10, tx),
-			lerp(v01, v11, tx),
-			ty
-		);
-	};
-
-	stbi_uc* loadTexture(const char* texture, u32& mask_w, u32& mask_h) {
-		os::InputFile file;
-		if (!m_app.getEngine().getFileSystem().open(texture, file)) {
-			logError("Failed to open ", texture);
-			return nullptr;
-		}
-		Array<u8> content(m_app.getAllocator());
-		content.resize((u32)file.size());
-		if (!file.read(content.begin(), content.byte_size())) {
-			logError("Failed to read ", texture);
-			file.close();
-			return nullptr;
-		}
-		file.close();
-
-		int w, h, ch;
-		stbi_uc* rgba = stbi_load_from_memory(content.begin(), content.byte_size(), &w, &h, &ch, 1);
-		if (!rgba) {
-			logError("Failed to parse ", texture);
-			return nullptr;
-		}
-		mask_w = w;
-		mask_h = h;
-		return rgba;
-	}
-
-	void maskTexture(const char* texture, float ref, float mask_scale) {
-		u32 mask_w, mask_h;
-		stbi_uc* mask = loadTexture(texture, mask_w, mask_h);
-		if (!mask) {
-			logError("Failed to load ", texture);
-			return;
-		}
-
-		u8* out = m_bitmap.begin();
-		const Vec2 rand_offset(randFloat(0, float(mask_w)), randFloat(0, float(mask_h)));
-		for (u32 j = 0; j < m_bitmap_size; ++j) {
-			for (u32 i = 0; i < m_bitmap_size; ++i) {
-				const float k = fmodf(rand_offset.x + i * mask_scale, (float)mask_w);
-				const float l = fmodf(rand_offset.y + j * mask_scale, (float)mask_h);
-				u8& m = out[i + j * m_bitmap_size]; 
-				m = sampleMask(mask, Vec2(k, l), IVec2(mask_w, mask_h)) > ref ? 0xff : m;
-			}
-		}
-		stbi_image_free(mask);
-	}
-
-	void unmaskTexture(const char* texture, float ref, float mask_scale) {
-		u32 mask_w, mask_h;
-		stbi_uc* mask = loadTexture(texture, mask_w, mask_h);
-		if (!mask) return;
-
-		u8* out = m_bitmap.begin();
-		for (u32 j = 0; j < m_bitmap_size; ++j) {
-			for (u32 i = 0; i < m_bitmap_size; ++i) {
-				const float k = fmodf(i * mask_scale, (float)mask_w);
-				const float l = fmodf(j * mask_scale, (float)mask_h);
-				u8& m = out[i + j * m_bitmap_size]; 
-				m = sampleMask(mask, Vec2(k, l), IVec2(mask_w, mask_h)) > ref ? 0 : m;
-			}
-		}
-		stbi_image_free(mask);
-	}
-
+	
 	void adjustHeight(const char* texture, float texture_scale, float hm_multiplier) {
 		u32 w, h;
-		stbi_uc* rgba = loadTexture(texture, w, h);
+		stbi_uc* rgba = loadTexture(texture, w, h, m_app);
 		if (!rgba) return;
 
 		const Terrain* terrain = getSelectedTerrain();
@@ -3585,125 +4222,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		stbi_image_free(rgba);
 	}
 
-	void paintGround(u8 ground) {
-		const Terrain* terrain = getSelectedTerrain();
-		if (!terrain) return;
-		
-		Texture* splatmap = terrain->getSplatmap();
-		if (!splatmap) {
-			logWarning("Missing splatmap");
-			return;
-		}
-		if(!splatmap->isReady()) {
-			logWarning("Splatmap not ready");
-			return;
-		}
-
-		auto is_masked = [&](u32 x, u32 y){
-			u32 i = u32(x / float(splatmap->width) * m_bitmap_size);
-			u32 j = u32(y / float(splatmap->height) * m_bitmap_size);
-			i = clamp(i, 0, m_bitmap_size - 1);
-			j = clamp(j, 0, m_bitmap_size - 1);
-			
-			return m_bitmap[i + j * m_bitmap_size] != 0;
-		};
-
-		u8* data = splatmap->getData();
-		for (u32 y = 0; y < splatmap->height; ++y) {
-			for (u32 x = 0; x < splatmap->width; ++x) {
-				if (is_masked(x, y)) {
-					u8* pixel = data + (x + (splatmap->height - y - 1) * splatmap->width) * 4;
-					pixel[0] = ground;
-					pixel[1] = ground;
-				}
-			}
-		}
-		splatmap->onDataUpdated(0, 0, splatmap->width, splatmap->height);
-	}
-	
-	void addGrass(u16 grass) {
-		paintGrassInternal(grass, true);
-	}
-
-	void paintGrass(u16 grass) {
-		paintGrassInternal(grass, false);
-	}
-
-	void paintGrassInternal(u16 grass, bool additive) {
-		Terrain* terrain = getSelectedTerrain();
-		if (!terrain) return;
-
-		Texture* splatmap = terrain->getSplatmap();
-		if (!splatmap) {
-			logWarning("Missing splatmap");
-			return;
-		}
-		if (!splatmap->isReady()) {
-			logWarning("Splatmap not ready");
-			return;
-		}
-
-		auto is_masked = [&](u32 x, u32 y){
-			u32 i = u32(x / float(splatmap->width) * m_bitmap_size + 0.5f);
-			u32 j = u32(y / float(splatmap->height) * m_bitmap_size + 0.5f);
-			i = clamp(i, 0, m_bitmap_size - 1);
-			j = clamp(j, 0, m_bitmap_size - 1);
-			
-			return m_bitmap[i + j * m_bitmap_size] != 0;
-		};
-
-		u8* data = splatmap->getData();
-		for (u32 y = 0; y < splatmap->height; ++y) {
-			for (u32 x = 0; x < splatmap->width; ++x) {
-				if (is_masked(x, y)) {
-					u8* pixel = data + (x + (splatmap->height - y - 1) * splatmap->width) * 4;
-					if (additive) {
-						u16* tmp = (u16*)(pixel + 2);
-						*tmp |= grass;
-					}
-					else {
-						memcpy(pixel + 2, &grass, sizeof(grass));
-					}
-				}
-			}
-		}
-		splatmap->onDataUpdated(0, 0, splatmap->width, splatmap->height);
-		terrain->setGrassDirty();
-	}
-
-	void OSMGUI() {
-		double dl_bottom = double(tiley2lat(double(m_y - (m_pixel_offset.y - m_area_edge) / 256.0), m_zoom));
-		double dl_left = double(tilex2long(double(m_x - (m_pixel_offset.x - m_area_edge) / 256.0), m_zoom));
-		double dl_top = double(tiley2lat(double(m_y - m_area_edge / 256.0 - m_pixel_offset.y / 256.0 + (1 << m_size)), m_zoom));
-		double dl_right = double(tilex2long(double(m_x - m_area_edge / 256.0 - m_pixel_offset.x / 256.0 + (1 << m_size)), m_zoom));
-
-		double bottom = double(tiley2lat(double(m_y - m_pixel_offset.y / 256.0), m_zoom));
-		double left = double(tilex2long(double(m_x - m_pixel_offset.x / 256.0), m_zoom));
-		double top = double(tiley2lat(double(m_y - m_pixel_offset.y / 256.0 + (1 << m_size)), m_zoom));
-		double right = double(tilex2long(double(m_x - m_pixel_offset.x / 256.0 + (1 << m_size)), m_zoom));
-		if (bottom > top) swap(bottom, top);
-		if (left > right) swap(left, right);
-		if (dl_bottom > dl_top) swap(dl_bottom, dl_top);
-		if (dl_left > dl_right) swap(dl_left, dl_right);
-
-		const float scale = m_scale * float(256 * (1 << m_size) * 156543.03 * cos(degreesToRadians(bottom)) / (1 << m_zoom));
-
-		ImGuiEx::Label("Area edge");
-		ImGui::DragInt("##areaedge", &m_area_edge);
-
-		if (ImGui::Button("Load map.osm")) parseOSMData(left, bottom, right, top, scale);
-		ImGui::SameLine();
-		if (ImGui::Button(ICON_FA_FILE_DOWNLOAD "download OSM data")) {
-			const StaticString<1024> osm_download_path("https://api.openstreetmap.org/api/0.6/map?bbox=", dl_left, ",", dl_bottom, ",", dl_right, ",", dl_top);
-			os::shellExecuteOpen(osm_download_path);
-		}
-
-		if (m_osm_editor.m_osm_parser.m_nodes.empty()) return;
-		m_osm_editor.gui();
-	}
-
 	void mapGUI() {
-
 		if (m_is_download_deferred) download();
 
 		ImGuiEx::Label("Size");
@@ -3732,8 +4251,11 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		ImGui::InputInt("##hmresample", &m_resample_hm);
 		ImGuiEx::Label("Output");
 		if (ImGui::Button(StaticString<LUMIX_MAX_PATH + 128>(m_out_path[0] ? m_out_path : "Click to set"), ImVec2(-1, 0))) {
-			browse();
+			m_show_save_raw = true;
 		}
+
+		FileSelector& fs = m_app.getFileSelector();
+		if (fs.gui("Save As", &m_show_save_raw, "raw", true)) copyString(m_out_path, fs.getPath());
 
 		if (m_out_path[0]) {
 			if (ImGui::Button(ICON_FA_SAVE "Save textures")) save();
@@ -3844,14 +4366,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	bool m_show_hm = false;
 	StudioApp& m_app;
-	char m_script[32*1024] = R"#(
-		clearMask(1024)
-		maskPolygons { key = "landuse", inverted = true }
-		unmaskPolylines { key = "highway" }
-		place { spacing = 2, prefabs = { "prefabs/05_poplar_skan.fab" } }
-		paintGrass (0xffFF)
-	)#";
-	Array<u8> m_tmp_bitmap;
 	Array<u8> m_bitmap;
 	u32 m_bitmap_size = 0;
 	Array<TileData*> m_tiles;
@@ -3867,11 +4381,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	i32 m_x = 0;
 	i32 m_y = 0;
 	IVec2 m_pixel_offset{0, 0};
-	i32 m_area_edge = 0;
 	i32 m_size = 1;
 	char m_out_path[LUMIX_MAX_PATH];
 	IVec2 m_drag_start_offset;
 	bool m_is_dragging = false;
+	bool m_has_focus = false;
+	bool m_show_save_raw = false;
 	Action m_toggle_ui;
 	Vec2 m_last_saved_hm_range = Vec2(0, 1000);
 	OSMNodeEditor m_osm_editor;
