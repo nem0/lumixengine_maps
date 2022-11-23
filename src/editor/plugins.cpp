@@ -905,7 +905,7 @@ struct OSMNodeEditor : NodeEditor {
 		bool m_show_mask_open = false;
 	};
 
-	OSMNodeEditor(StudioApp& app)
+	OSMNodeEditor(struct MapsPlugin& plugin, StudioApp& app)
 		: NodeEditor(app.getAllocator())
 		, m_app(app)
 		, m_allocator(app.getAllocator())
@@ -916,22 +916,27 @@ struct OSMNodeEditor : NodeEditor {
 	{
 		pushUndo(NO_MERGE_UNDO);
 
+		m_delete_action.init(ICON_FA_TRASH "Delete", "Maps node delete", "maps_nodes_delete", ICON_FA_TRASH, os::Keycode::DEL, Action::Modifiers::NONE, true);
+		m_delete_action.func.bind<&OSMNodeEditor::deleteSelectedNodes>(this);
+		m_delete_action.plugin = &plugin;*this, 
+
 		m_save_action.init(ICON_FA_SAVE "Save", "Maps nodes save", "maps_nodes_save", ICON_FA_SAVE, os::Keycode::S, Action::Modifiers::CTRL, true);
 		m_save_action.func.bind<&OSMNodeEditor::save>(this);
-		m_save_action.plugin = this;
+		m_save_action.plugin = &plugin;*this, 
 
 		m_run_action.init(ICON_FA_PLAY "Run", "Maps nodes run", "maps_nodes_run", ICON_FA_PLAY, (os::Keycode)'P', Action::Modifiers::CTRL, true);
 		m_run_action.func.bind<&OSMNodeEditor::run>(this);
-		m_run_action.plugin = this;
+		m_run_action.plugin = &plugin;*this, 
 
 		m_undo_action.init(ICON_FA_UNDO "Undo", "Maps nodes undo", "maps_nodes_undo", ICON_FA_UNDO, os::Keycode::Z, Action::Modifiers::CTRL, true);
 		m_undo_action.func.bind<&OSMNodeEditor::undo>((SimpleUndoRedo*)this);
-		m_undo_action.plugin = this;
+		m_undo_action.plugin = &plugin;*this, 
 
 		m_redo_action.init(ICON_FA_REDO "Redo", "Maps nodes redo", "maps_nodes_redo", ICON_FA_REDO, os::Keycode::Z, Action::Modifiers::CTRL | Action::Modifiers::SHIFT, true);
 		m_redo_action.func.bind<&OSMNodeEditor::redo>((SimpleUndoRedo*)this);
-		m_redo_action.plugin = this;
+		m_redo_action.plugin = &plugin;
 
+		app.addAction(&m_delete_action);
 		app.addAction(&m_save_action);
 		app.addAction(&m_run_action);
 		app.addAction(&m_undo_action);
@@ -939,6 +944,7 @@ struct OSMNodeEditor : NodeEditor {
 	}
 
 	~OSMNodeEditor() {
+		m_app.removeAction(&m_delete_action);
 		m_app.removeAction(&m_save_action);
 		m_app.removeAction(&m_run_action);
 		m_app.removeAction(&m_undo_action);
@@ -965,6 +971,24 @@ struct OSMNodeEditor : NodeEditor {
 			if (len == 0) break;
 			m_recent_paths.emplace(tmp, m_app.getAllocator());
 		}
+	}
+
+	void deleteSelectedNodes() {
+		if (m_is_any_item_active) return;
+		for (i32 i = m_nodes.size() - 1; i >= 0; --i) {
+			Node* node = m_nodes[i];
+			if (node->m_selected) {
+				for (i32 j = m_links.size() - 1; j >= 0; --j) {
+					if (m_links[j].getFromNode() == node->m_id || m_links[j].getToNode() == node->m_id) {
+						m_links.erase(j);
+					}
+				}
+
+				LUMIX_DELETE(m_allocator, node);
+				m_nodes.swapAndPop(i);
+			}
+		}		
+		pushUndo(NO_MERGE_UNDO);
 	}
 
 	void destroyPreviewTexture() {
@@ -1196,6 +1220,7 @@ struct OSMNodeEditor : NodeEditor {
 	u32 m_node_id_genereator = 1;
 	Array<String> m_recent_paths;
 	Action m_run_action;
+	Action m_delete_action;
 	Action m_save_action;
 	Action m_undo_action;
 	Action m_redo_action;
@@ -2919,7 +2944,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		, m_in_progress(app.getAllocator())
 		, m_queue(app.getAllocator())
 		, m_bitmap(app.getAllocator())
-		, m_osm_editor(app)
+		, m_osm_editor(*this, app)
 	{
 		#ifdef _WIN32
 			WORD sockVer;
