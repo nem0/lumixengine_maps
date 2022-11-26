@@ -1112,7 +1112,7 @@ struct OSMNodeEditor : NodeEditor {
 			if (t.key) {
 				label << " (LMB + " << t.key << ")";
 			}
-			if ((!filter[0] || strstr(t.label, filter) != nullptr) && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::MenuItem(label))){
+			if ((!filter[0] || stristr(t.label, filter) != nullptr) && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::MenuItem(label))){
 				new_node = addNode(t.type, pos, true);
 				filter[0] = '\0';
 				ImGui::CloseCurrentPopup();
