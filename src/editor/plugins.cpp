@@ -965,11 +965,14 @@ struct OSMNodeEditor : NodeEditor {
 	void onSettingsLoaded(Settings& settings) {
 		m_recent_paths.clear();
 		char tmp[LUMIX_MAX_PATH];
+		FileSystem& fs = m_app.getEngine().getFileSystem();
 		for (u32 i = 0; ; ++i) {
 			const StaticString<32> key("maps_plugin_recent_", i);
 			const u32 len = settings.getValue(Settings::LOCAL, key, Span(tmp));
 			if (len == 0) break;
-			m_recent_paths.emplace(tmp, m_app.getAllocator());
+			if (fs.fileExists(tmp)) {
+				m_recent_paths.emplace(tmp, m_app.getAllocator());
+			}
 		}
 	}
 
@@ -1205,8 +1208,8 @@ struct OSMNodeEditor : NodeEditor {
 		}
 
 		FileSelector& fs = m_app.getFileSelector();
-		if (fs.gui("Open", &m_show_open, "mpg", false)) open(fs.getPath());
-		if (fs.gui("Save As", &m_show_save_as, "mpg", true)) saveAs(fs.getPath());
+		if (fs.gui("Open", &m_show_open, "mgr", false)) open(fs.getPath());
+		if (fs.gui("Save As", &m_show_save_as, "mgr", true)) saveAs(fs.getPath());
 
 		nodeEditorGUI(m_nodes, m_links);
 		ImGui::EndChild();
@@ -1698,12 +1701,18 @@ struct AdjustHeightNode  : OSMNodeEditor::Node {
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override { return {}; }
 	
 	bool gui() override {
-		ImGuiEx::NodeTitle("Adjust height");
+		ImGuiEx::BeginNodeTitleBar();
+		ImGui::AlignTextToFramePadding();
+		ImGui::TextUnformatted("Adjust height");
+		ImGui::SameLine();
+		if (ImGui::Button(ICON_FA_PLAY)) run();
+		ImGuiEx::EndNodeTitleBar();
 		inputSlot(OutputType::DISTANCE_FIELD);
 		
 		bool res = textureMaskInput(m_texture);
-		res = ImGui::DragFloat("Texture scale", &m_texture_scale);
-		res = ImGui::DragFloat("Multiplier", &m_multiplier);
+		res = ImGui::DragFloat("Texture scale", &m_texture_scale) || res;
+		res = ImGui::DragFloat("Multiplier", &m_multiplier) || res;
+		res = ImGui::DragFloatRange2("Distance", &m_distance_range.x, &m_distance_range.y, 1.f, -FLT_MAX, FLT_MAX, "%.1f", nullptr, ImGuiSliderFlags_AlwaysClamp) || res;
 		return false;
 	}
 
@@ -1775,10 +1784,12 @@ struct AdjustHeightNode  : OSMNodeEditor::Node {
 
 		for (u32 j = 0; j < df->m_size; ++j) {
 			for (u32 i = 0; i < df->m_size; ++i) {
-				if (df->m_field[i + j * df->m_size]) {
+				const float dist = df->m_field[i + j * df->m_size];
+				if (dist > m_distance_range.x) {
+					const float distance_weight = clamp((dist - m_distance_range.x) / (m_distance_range.y - m_distance_range.x), 0.f, 1.f);
 					const u32 idx = i + (df->m_size - j - 1) * df->m_size;
 					float height = (hm_data[idx] / float(0xffFF));
-					height += sample(i, j) * m_multiplier;
+					height += sample(i, j) * m_multiplier * distance_weight;
 					hm_data[idx] = (u16)clamp(height * float(0xffFF), 0.f, (float)0xffFF);
 				}
 			}
@@ -1791,6 +1802,7 @@ struct AdjustHeightNode  : OSMNodeEditor::Node {
 	StaticString<LUMIX_MAX_PATH> m_texture;
 	float m_texture_scale = 1.f;
 	float m_multiplier = 1.f;
+	Vec2 m_distance_range = Vec2(0, 1);
 };
 
 struct FlattenPolylinesNode : OSMNodeEditor::Node {
@@ -2218,8 +2230,16 @@ struct NoiseNode : OSMNodeEditor::Node {
 	NodeType getType() const override { return NodeType::NOISE; }
 	bool hasInputPins() const override { return false; }
 	bool hasOutputPins() const override { return true; }
-	void serialize(OutputMemoryStream& blob) override {}
-	void deserialize(InputMemoryStream& blob) override {}
+
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(m_value);
+		blob.write(m_probability);
+	}
+	
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(m_value);
+		blob.read(m_probability);
+	}
 
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
 		if (!getSelectedTerrain(m_editor->m_app)) return {};
@@ -2264,8 +2284,7 @@ struct MaskDistanceNode : OSMNodeEditor::Node {
 		nodeTitle("Mask distance");
 		inputSlot(OutputType::DISTANCE_FIELD);
 		outputSlot();
-		ImGui::TextUnformatted(" ");
-		return false;
+		return ImGui::DragFloatRange2("Distance", &m_from, &m_to, 1.f, -FLT_MAX, FLT_MAX, "%.1f", nullptr, ImGuiSliderFlags_AlwaysClamp);
 	}
 	
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
