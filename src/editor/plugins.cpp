@@ -84,21 +84,21 @@ static const struct {
 	const char* label;
 	NodeType type;
 } TYPES[] = {
-	{ 'F', "Flatten polylines", NodeType::FLATTEN_POLYLINES },
-	{ 'L', "Mask polylines", NodeType::MASK_POLYLINES },
-	{ 'P', "Mask polygons", NodeType::MASK_POLYGONS },
-	{ 'G', "Paint ground", NodeType::PAINT_GROUND },
-	{ 'I', "Invert", NodeType::INVERT },
-	{ 'R', "Grass", NodeType::GRASS },
-	{ 'N', "Noise", NodeType::NOISE },
-	{ 'M', "Merge masks", NodeType::MERGE_MASKS },
-	{ 'M', "Merge distance ", NodeType::MERGE_DISTANCE_FIELDS },
+	{ 'H', "Adjust height", NodeType::ADJUST_HEIGHT },
 	{ 'D', "Distance field", NodeType::DISTANCE_FIELD },
+	{ 'F', "Flatten polylines", NodeType::FLATTEN_POLYLINES },
+	{ 'R', "Grass", NodeType::GRASS },
+	{ 'I', "Invert", NodeType::INVERT },
+	{ 0, "Mask distance", NodeType::MASK_DISTANCE },
+	{ 'P', "Mask polygons", NodeType::MASK_POLYGONS },
+	{ 'L', "Mask polylines", NodeType::MASK_POLYLINES },
+	{ 0, "Mask texture", NodeType::MASK_TEXTURE },
+	{ 'M', "Merge distance ", NodeType::MERGE_DISTANCE_FIELDS },
+	{ 'M', "Merge masks", NodeType::MERGE_MASKS },
+	{ 'N', "Noise", NodeType::NOISE },
+	{ 'G', "Paint ground", NodeType::PAINT_GROUND },
 	{ 0, "Place instances", NodeType::PLACE_INSTANCES },
 	{ 0, "Place splines", NodeType::PLACE_SPLINES },
-	{ 'H', "Adjust height", NodeType::ADJUST_HEIGHT },
-	{ 0, "Mask texture", NodeType::MASK_TEXTURE },
-	{ 0, "Mask distance", NodeType::MASK_DISTANCE },
 };
 	
 static stbi_uc* loadTexture(const char* texture, u32& mask_w, u32& mask_h, StudioApp& app) {
@@ -1103,9 +1103,21 @@ struct OSMNodeEditor : NodeEditor {
 
 	void onContextMenu(bool recently_opened, ImVec2 pos) override {
 		static char filter[64] = "";
+		if (recently_opened) ImGui::SetKeyboardFocusHere();
+		ImGui::SetNextItemWidth(150);
+		ImGui::InputTextWithHint("##filter", "Filter", filter, sizeof(filter));
 		Node* new_node = nullptr;
 		for (const auto& t : TYPES) {
-			if (ImGui::MenuItem(t.label)) new_node = addNode(t.type, pos, true);
+			StaticString<64> label(t.label);
+			if (t.key) {
+				label << " (LMB + " << t.key << ")";
+			}
+			if ((!filter[0] || strstr(t.label, filter) != nullptr) && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::MenuItem(label))){
+				new_node = addNode(t.type, pos, true);
+				filter[0] = '\0';
+				ImGui::CloseCurrentPopup();
+				break;
+			}
 		}
 	}
 
@@ -1485,7 +1497,7 @@ struct MergeDistanceFieldsNode : OSMNodeEditor::Node {
 		inputSlot(OutputType::DISTANCE_FIELD); ImGui::TextUnformatted("B");
 		ImGui::EndGroup();
 		ImGui::SameLine();
-		outputSlot();
+		outputSlot(OutputType::DISTANCE_FIELD);
 		return false;
 	}
 };
