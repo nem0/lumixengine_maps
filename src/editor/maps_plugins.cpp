@@ -1114,11 +1114,9 @@ struct OSMNodeEditor : NodeEditor {
 
 	void onLinkDoubleClicked(NodeEditorLink& link, ImVec2 pos) override {}
 
-	void onContextMenu(bool recently_opened, ImVec2 pos) override {
+	void onContextMenu(ImVec2 pos) override {
 		static char filter[64] = "";
-		if (recently_opened) ImGui::SetKeyboardFocusHere();
-		ImGui::SetNextItemWidth(150);
-		ImGui::InputTextWithHint("##filter", "Filter", filter, sizeof(filter));
+		ImGuiEx::filter("Filter", filter, sizeof(filter), 150, ImGui::IsWindowAppearing());
 		Node* new_node = nullptr;
 		for (const auto& t : TYPES) {
 			StaticString<64> label(t.label);
