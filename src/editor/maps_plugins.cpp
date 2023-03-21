@@ -593,9 +593,9 @@ struct OSMParser {
 
 	void getWay(const pugi::xml_node& way, EntityRef terrain, Array<DVec3>& out) const {
 		WorldEditor& editor = m_app.getWorldEditor();
-		Universe* universe = editor.getUniverse();
-		RenderScene* scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
-		const double y_base = universe->getPosition(terrain).y;
+		World* world = editor.getWorld();
+		RenderScene* scene = (RenderScene*)world->getScene(TERRAIN_TYPE);
+		const double y_base = world->getPosition(terrain).y;
 		
 		for (pugi::xml_node& c : way.children()) {
 			if (equalStrings(c.name(), "nd")) {
@@ -655,7 +655,7 @@ struct OSMParser {
 		return true;
 	}
 
-	BoundingBox createAreaMesh(Polygon& polygon, EntityRef terrain, u32 abgr, Array<UniverseView::Vertex>& out, IAllocator& allocator) const {
+	BoundingBox createAreaMesh(Polygon& polygon, EntityRef terrain, u32 abgr, Array<WorldView::Vertex>& out, IAllocator& allocator) const {
 		if (polygon.size() < 3) return {};
 		BoundingBox res;
 		res.center = DVec3(0);
@@ -681,7 +681,7 @@ struct OSMParser {
 		const DVec3 ca = p2 - p0;
 		const bool side_negative = ba.x * ca.z - ba.z * ca.x < 0;
 		RenderInterface* ri = m_app.getRenderInterface();
-		Universe* universe = m_app.getWorldEditor().getUniverse();
+		World* world = m_app.getWorldEditor().getWorld();
 
 		while (polygon.size() > 3) {
 			const i32 size = polygon.size(); 
@@ -715,7 +715,7 @@ struct OSMParser {
 	}
 
 
-	void createPolyline(const Array<DVec3>& points, u32 color, Array<UniverseView::Vertex>& out) {
+	void createPolyline(const Array<DVec3>& points, u32 color, Array<WorldView::Vertex>& out) {
 		if (points.empty()) return;
 
 		const float half_extents = m_scale * 0.5f;
@@ -821,9 +821,9 @@ static double tiley2lat(double y, int z) {
 static EntityPtr getTerrainEntity(StudioApp& app) {
 	WorldEditor& editor = app.getWorldEditor();
 	if (editor.getSelectedEntities().size() != 1) return INVALID_ENTITY;
-	const Universe* universe = editor.getUniverse();
+	const World* world = editor.getWorld();
 	const EntityRef terrain = editor.getSelectedEntities()[0];
-	if (!universe->hasComponent(terrain, TERRAIN_TYPE)) return INVALID_ENTITY;
+	if (!world->hasComponent(terrain, TERRAIN_TYPE)) return INVALID_ENTITY;
 	return terrain;
 }
 
@@ -1390,13 +1390,13 @@ static void raster(Span<const Vec2> points, u32 w, i32 change, Array<u8>& out) {
 
 static Terrain* getSelectedTerrain(StudioApp& app) {
 	WorldEditor& editor = app.getWorldEditor();
-	Universe* universe = app.getWorldEditor().getUniverse();
+	World* world = app.getWorldEditor().getWorld();
 	const Array<EntityRef>& selected_entities = editor.getSelectedEntities();
 	
 	if (selected_entities.size() != 1) return nullptr;
-	if (!universe->hasComponent(selected_entities[0], TERRAIN_TYPE)) return nullptr;
+	if (!world->hasComponent(selected_entities[0], TERRAIN_TYPE)) return nullptr;
 
-	RenderScene* scene = (RenderScene*)universe->getScene("renderer");
+	RenderScene* scene = (RenderScene*)world->getScene("renderer");
 	return scene->getTerrain(selected_entities[0]);
 }
 
@@ -1937,7 +1937,7 @@ struct FlattenPolylinesNode : OSMNodeEditor::Node {
 		ASSERT(terrain.m_heightmap->format == gpu::TextureFormat::R16);
 		ASSERT(terrain.m_splatmap);
 
-		const float base_y = (float)m_editor->m_app.getWorldEditor().getUniverse()->getPosition(terrain.m_entity).y;
+		const float base_y = (float)m_editor->m_app.getWorldEditor().getWorld()->getPosition(terrain.m_entity).y;
 
 		const Vec2 a2d = Vec3(a).xz();
 		const Vec2 b2d = Vec3(b).xz();
@@ -2031,7 +2031,7 @@ struct PlaceSplinesNode : OSMNodeEditor::Node {
 		if (!terrain->m_heightmap->isReady()) return;
 
 		WorldEditor& editor = app.getWorldEditor();
-		CoreScene* core_scene = (CoreScene*)editor.getUniverse()->getScene(SPLINE_TYPE);
+		CoreScene* core_scene = (CoreScene*)editor.getWorld()->getScene(SPLINE_TYPE);
 		
 		editor.beginCommandGroup("place_splines");
 		SplineEditor* spline_editor = static_cast<SplineEditor*>(app.getIPlugin("spline_editor"));
@@ -2119,11 +2119,11 @@ struct PlaceInstancesNode : OSMNodeEditor::Node {
 		DistanceFieldOutput* df = (DistanceFieldOutput*)input.get();
 
 		WorldEditor& editor = m_editor->m_app.getWorldEditor();
-		Universe* universe = editor.getUniverse();
-		RenderScene* render_scene = (RenderScene*)universe->getScene(TERRAIN_TYPE);
+		World* world = editor.getWorld();
+		RenderScene* render_scene = (RenderScene*)world->getScene(TERRAIN_TYPE);
 		EntityPtr terrain_entity = getTerrainEntity(m_editor->m_app);
 		if (!terrain_entity) return;
-		const DVec3 terrain_pos = universe->getPosition(*terrain_entity);
+		const DVec3 terrain_pos = world->getPosition(*terrain_entity);
 	
 		struct Group {
 			EntityRef e;
@@ -3536,12 +3536,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			ImGui::TextUnformatted("No entity selected");
 			return;
 		}
-		Universe* universe = editor.getUniverse();
-		if (!universe->hasComponent(entities[0], TERRAIN_TYPE)) {
+		World* world = editor.getWorld();
+		if (!world->hasComponent(entities[0], TERRAIN_TYPE)) {
 			ImGui::TextUnformatted("Selected entity does not have terrain component");
 			return;
 		}
-		RenderScene* scene = (RenderScene*)universe->getScene("renderer");
+		RenderScene* scene = (RenderScene*)world->getScene("renderer");
 		Material* mat = scene->getTerrainMaterial(entities[0]);
 		if (!mat->isReady()) {
 			ImGui::Text("Material %s not ready", mat->getPath().c_str());
@@ -3672,13 +3672,13 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 	Terrain* getSelectedTerrain() const {
 		WorldEditor& editor = m_app.getWorldEditor();
-		Universe* universe = m_app.getWorldEditor().getUniverse();
+		World* world = m_app.getWorldEditor().getWorld();
 		const Array<EntityRef>& selected_entities = editor.getSelectedEntities();
 		
 		if (selected_entities.size() != 1) return nullptr;
-		if (!universe->hasComponent(selected_entities[0], TERRAIN_TYPE)) return nullptr;
+		if (!world->hasComponent(selected_entities[0], TERRAIN_TYPE)) return nullptr;
 
-		RenderScene* scene = (RenderScene*)universe->getScene("renderer");
+		RenderScene* scene = (RenderScene*)world->getScene("renderer");
 		return scene->getTerrain(selected_entities[0]);
 	}
 
