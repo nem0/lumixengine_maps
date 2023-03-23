@@ -1121,7 +1121,7 @@ struct OSMNodeEditor : NodeEditor {
 		for (const auto& t : TYPES) {
 			StaticString<64> label(t.label);
 			if (t.key) {
-				label << " (LMB + " << t.key << ")";
+				label.append(" (LMB + ", t.key, ")");
 			}
 			if ((!filter[0] || stristr(t.label, filter) != nullptr) && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::MenuItem(label))){
 				new_node = addNode(t.type, pos, true);
