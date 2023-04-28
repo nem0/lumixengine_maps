@@ -27,7 +27,7 @@
 #include "renderer/editor/terrain_editor.h"
 #include "renderer/material.h"
 #include "renderer/model.h"
-#include "renderer/render_scene.h"
+#include "renderer/render_module.h"
 #include "renderer/terrain.h"
 #include "renderer/texture.h"
 #include "stb/stb_image.h"
@@ -594,7 +594,7 @@ struct OSMParser {
 	void getWay(const pugi::xml_node& way, EntityRef terrain, Array<DVec3>& out) const {
 		WorldEditor& editor = m_app.getWorldEditor();
 		World* world = editor.getWorld();
-		RenderScene* scene = (RenderScene*)world->getScene(TERRAIN_TYPE);
+		RenderModule* module = (RenderModule*)world->getModule(TERRAIN_TYPE);
 		const double y_base = world->getPosition(terrain).y;
 		
 		for (pugi::xml_node& c : way.children()) {
@@ -604,7 +604,7 @@ struct OSMParser {
 				DVec3 p;
 				p.x = (lat_lon.y - m_min_lon) / m_lon_range * m_scale;
 				p.z = (m_min_lat + m_lat_range - lat_lon.x) / m_lat_range * m_scale;
-				p.y = scene->getTerrainHeightAt(terrain, (float)p.x, (float)p.z) + y_base;
+				p.y = module->getTerrainHeightAt(terrain, (float)p.x, (float)p.z) + y_base;
 				p.x -= m_scale * 0.5f;
 				p.z -= m_scale * 0.5f;
 				out.push(p);
@@ -1396,8 +1396,8 @@ static Terrain* getSelectedTerrain(StudioApp& app) {
 	if (selected_entities.size() != 1) return nullptr;
 	if (!world->hasComponent(selected_entities[0], TERRAIN_TYPE)) return nullptr;
 
-	RenderScene* scene = (RenderScene*)world->getScene("renderer");
-	return scene->getTerrain(selected_entities[0]);
+	RenderModule* module = (RenderModule*)world->getModule("renderer");
+	return module->getTerrain(selected_entities[0]);
 }
 
 static u32 getSplatmapSize(StudioApp& app) {
@@ -2031,7 +2031,6 @@ struct PlaceSplinesNode : OSMNodeEditor::Node {
 		if (!terrain->m_heightmap->isReady()) return;
 
 		WorldEditor& editor = app.getWorldEditor();
-		CoreScene* core_scene = (CoreScene*)editor.getWorld()->getScene(SPLINE_TYPE);
 		
 		editor.beginCommandGroup("place_splines");
 		SplineEditor* spline_editor = static_cast<SplineEditor*>(app.getIPlugin("spline_editor"));
@@ -2120,7 +2119,7 @@ struct PlaceInstancesNode : OSMNodeEditor::Node {
 
 		WorldEditor& editor = m_editor->m_app.getWorldEditor();
 		World* world = editor.getWorld();
-		RenderScene* render_scene = (RenderScene*)world->getScene(TERRAIN_TYPE);
+		RenderModule* render_module = (RenderModule*)world->getModule(TERRAIN_TYPE);
 		EntityPtr terrain_entity = getTerrainEntity(m_editor->m_app);
 		if (!terrain_entity) return;
 		const DVec3 terrain_pos = world->getPosition(*terrain_entity);
@@ -2142,11 +2141,11 @@ struct PlaceInstancesNode : OSMNodeEditor::Node {
 		}
 	
 		for (Group& g : groups) {
-			g.im = &render_scene->beginInstancedModelEditing(g.e);
+			g.im = &render_module->beginInstancedModelEditing(g.e);
 		}
 	
 		const double y_base = terrain_pos.y;
-		const Vec2 size = render_scene->getTerrainSize(*terrain_entity);
+		const Vec2 size = render_module->getTerrainSize(*terrain_entity);
 		const Vec2 df_to_terrain = size / Vec2((float)df->m_size, (float)df->m_size);
 		const Vec2 terrain_to_df = Vec2((float)df->m_size, (float)df->m_size) / size;
 	
@@ -2172,7 +2171,7 @@ struct PlaceInstancesNode : OSMNodeEditor::Node {
 				const i32 idx = i32(fx) + i32(fy) * df->m_size;
 				const float distance = df->m_field[idx];
 				if (distance >= min_dist && distance <= max_dist) {
-					pos.y = render_scene->getTerrainHeightAt(*terrain_entity, (float)pos.x, (float)pos.z);
+					pos.y = render_module->getTerrainHeightAt(*terrain_entity, (float)pos.x, (float)pos.z);
 	
 					pos.x -= size.x * 0.5f;
 					pos.y += y_base;
@@ -2198,7 +2197,7 @@ struct PlaceInstancesNode : OSMNodeEditor::Node {
 		}
 	
 		for (Group& g : groups) {
-			render_scene->endInstancedModelEditing(g.e);
+			render_module->endInstancedModelEditing(g.e);
 		}
 	
 		editor.endCommandGroup();
@@ -3541,8 +3540,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			ImGui::TextUnformatted("Selected entity does not have terrain component");
 			return;
 		}
-		RenderScene* scene = (RenderScene*)world->getScene("renderer");
-		Material* mat = scene->getTerrainMaterial(entities[0]);
+		RenderModule* module = (RenderModule*)world->getModule("renderer");
+		Material* mat = module->getTerrainMaterial(entities[0]);
 		if (!mat->isReady()) {
 			ImGui::Text("Material %s not ready", mat->getPath().c_str());
 			return;
@@ -3678,8 +3677,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		if (selected_entities.size() != 1) return nullptr;
 		if (!world->hasComponent(selected_entities[0], TERRAIN_TYPE)) return nullptr;
 
-		RenderScene* scene = (RenderScene*)world->getScene("renderer");
-		return scene->getTerrain(selected_entities[0]);
+		RenderModule* module = (RenderModule*)world->getModule("renderer");
+		return module->getTerrain(selected_entities[0]);
 	}
 
 	void mapGUI() {
