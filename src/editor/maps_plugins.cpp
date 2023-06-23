@@ -736,13 +736,13 @@ struct OSMParser {
 		}
 	}
 
-	void parseOSM(double left, double bottom, double right, double top, float scale, const OutputMemoryStream& data) {
+	[[nodiscard]] bool parseOSM(double left, double bottom, double right, double top, float scale, const OutputMemoryStream& data) {
 		m_nodes.clear();
 		m_ways.clear();
 		m_relations.clear();
 		
 		const pugi::xml_parse_result res = m_doc.load_buffer(data.data(), data.size());
-		ASSERT(pugi::status_ok == res.status);
+		if (pugi::status_ok != res.status) return false;
 
 		pugi::xml_node osm_root = m_doc.root().first_child();
 
@@ -786,6 +786,7 @@ struct OSMParser {
 			if (hasTag(w, "building")) createArea(w);
 			else if (isRoad(w)) createRoad(w);
 		}*/
+		return true;
 	}
 
 	StudioApp& m_app;
@@ -1166,11 +1167,6 @@ struct OSMNodeEditor : NodeEditor {
 		else saveAs(m_path.c_str());
 	}
 
-	bool canLoadMapOSM() const {
-		FileSystem& fs = m_app.getEngine().getFileSystem();
-		return fs.fileExists("map.osm");
-	}
-
 	void gui(i32 x, i32 y, IVec2 pixel_offset, i32 zoom, float scale, i32 size) {
 		if (m_show_preview) {
 			ImGui::OpenPopup("Preview");
@@ -1216,9 +1212,25 @@ struct OSMNodeEditor : NodeEditor {
 			if (ImGui::BeginMenu("OSM data")) {
 				if (ImGui::MenuItem(ICON_FA_FILE_DOWNLOAD "Download")) {
 					const StaticString<1024> osm_download_path("https://api.openstreetmap.org/api/0.6/map?bbox=", dl_left, ",", dl_bottom, ",", dl_right, ",", dl_top);
+					const StableHash url_hash(osm_download_path.data, stringLength(osm_download_path.data));
+					const Path cache_path(".lumix/maps_cache/osm_", url_hash.getHashValue());
+					FileSystem& fs = m_app.getEngine().getFileSystem();
 					OutputMemoryStream blob(m_allocator);
-					if (download(osm_download_path, blob)) {
-						m_osm_parser.parseOSM(left, bottom, right, top, level_scale, blob);
+					if (fs.fileExists(cache_path) && fs.getContentSync(cache_path, blob)) {
+						if (!m_osm_parser.parseOSM(left, bottom, right, top, level_scale, blob)) {
+							logError("Failed to parse ", osm_download_path);
+						}
+						else {
+							logInfo(osm_download_path, " loaded from cache - ", cache_path);
+						}
+					}
+					else if (download(osm_download_path, blob)) {
+						if (!fs.saveContentSync(cache_path, blob)) {
+							logWarning("Could not save ", cache_path);
+						}
+						if (!m_osm_parser.parseOSM(left, bottom, right, top, level_scale, blob)) {
+							logError("Failed to parse ", osm_download_path);
+						}
 					}
 					else {
 						logError("Failed to download ", osm_download_path);
@@ -2850,7 +2862,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		bool loadFromCache() {
 			FileSystem& fs = app->getWorldEditor().getEngine().getFileSystem();
-			const StaticString<LUMIX_MAX_PATH> path(".lumix/_maps_cache", "/", is_heightmap ? "hm" : "im", tile.loc.z, "_", tile.loc.x, "_", tile.loc.y);
+			const StaticString<LUMIX_MAX_PATH> path(".lumix/maps_cache", "/", is_heightmap ? "hm" : "im", tile.loc.z, "_", tile.loc.x, "_", tile.loc.y);
 			
 			os::InputFile file;
 			if (fs.open(path, file)) {
@@ -2865,7 +2877,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		void saveToCache() {
 			FileSystem& fs = app->getWorldEditor().getEngine().getFileSystem();
-			const StaticString<LUMIX_MAX_PATH> dir(fs.getBasePath(), ".lumix/_maps_cache");
+			const StaticString<LUMIX_MAX_PATH> dir(fs.getBasePath(), ".lumix/maps_cache");
 			if (!os::makePath(dir)) {
 				logError("Could not create", dir);
 			}
