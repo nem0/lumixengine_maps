@@ -1037,7 +1037,7 @@ struct OSMNodeEditor : NodeEditor {
 		Array<u32> tmp(m_app.getAllocator());
 		tmp.resize(mask->m_bitmap.size());
 		for (u32 i = 0, c = mask->m_bitmap.size(); i < c; ++i) {
-			u32 v = mask->m_bitmap[i];
+			u32 v = mask->m_bitmap[i] > 0 ? 0xff : 0;
 			tmp[i] = Color(v, v, v, 0xff).abgr();
 		}
 		m_preview_texture = ri->createTexture("maps_debug", tmp.begin(), mask->m_size, mask->m_size);
@@ -2850,7 +2850,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		bool loadFromCache() {
 			FileSystem& fs = app->getWorldEditor().getEngine().getFileSystem();
-			const StaticString<LUMIX_MAX_PATH> path("_maps_cache", "/", is_heightmap ? "hm" : "im", tile.loc.z, "_", tile.loc.x, "_", tile.loc.y);
+			const StaticString<LUMIX_MAX_PATH> path(".lumix/_maps_cache", "/", is_heightmap ? "hm" : "im", tile.loc.z, "_", tile.loc.x, "_", tile.loc.y);
 			
 			os::InputFile file;
 			if (fs.open(path, file)) {
@@ -2865,7 +2865,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		void saveToCache() {
 			FileSystem& fs = app->getWorldEditor().getEngine().getFileSystem();
-			const StaticString<LUMIX_MAX_PATH> dir(fs.getBasePath(), "_maps_cache");
+			const StaticString<LUMIX_MAX_PATH> dir(fs.getBasePath(), ".lumix/_maps_cache");
 			if (!os::makePath(dir)) {
 				logError("Could not create", dir);
 			}
