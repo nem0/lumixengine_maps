@@ -2887,11 +2887,14 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		int task() override {
 			if (loadFromCache()) return 0;
 			
-			String url("http://", allocator);
+			String url("https://", allocator);
 			url.cat((const char*)host);
 			url.cat((const char*)path);
 			OutputMemoryStream data(allocator);
-			if (!::download(url.c_str(), data)) return -1;
+			if (!::download(url.c_str(), data)) {
+				logError("Failed to download ", url);
+				return -1;
+			}
 
 			const bool res = parseImage(data);
 			if (res) saveToCache();
