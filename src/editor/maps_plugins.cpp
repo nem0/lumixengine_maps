@@ -3334,7 +3334,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		const StaticString<LUMIX_MAX_PATH> satellite_meta_path(file_info.m_dir, file_info.m_basename, ".tga.meta");
 		const StaticString<LUMIX_MAX_PATH> splatmap_meta_path(file_info.m_dir, "splatmap.tga.meta");
 		
-		if (!file.open(satellite_meta_path)) {
+		if (!fs.open(satellite_meta_path, file)) {
 			logError("Failed to create ", satellite_meta_path);
 		}
 		else {
@@ -3342,7 +3342,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			file.close();
 		}
 		
-		if (!file.open(splatmap_meta_path)) {
+		if (!fs.open(splatmap_meta_path, file)) {
 			logError("Failed to create ", splatmap_meta_path);
 		}
 		else {
@@ -3352,8 +3352,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			file.close();
 		}
 
-		if (!os::fileExists(splatmap_path)) {
-			if (!file.open(splatmap_path)) {
+		if (!fs.fileExists(splatmap_path)) {
+			if (!fs.open(splatmap_path, file)) {
 				logError("Failed to create ", splatmap_path);
 			}
 			else {
@@ -3365,8 +3365,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			}
 		}
 
-		if (!os::fileExists(albedo_path)) {
-			if (!file.open(albedo_path)) {
+		if (!fs.fileExists(albedo_path)) {
+			if (!fs.open(albedo_path, file)) {
 				logError("Failed to create ", albedo_path);
 			}
 			else {
@@ -3381,8 +3381,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			}
 		}
 
-		if (!os::fileExists(normal_path)) {
-			if (!file.open(normal_path)) {
+		if (!fs.fileExists(normal_path)) {
+			if (!fs.open(normal_path, file)) {
 				logError("Failed to create ", normal_path);
 			}
 			else {
@@ -3399,8 +3399,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		StaticString<LUMIX_MAX_PATH> mat_path(file_info.m_dir, "/", file_info.m_basename, ".mat");
 		os::OutputFile mat_file;
-		if (!os::fileExists(mat_path)) {
-			if (mat_file.open(mat_path)) {
+		if (!fs.fileExists(mat_path)) {
+			if (fs.open(mat_path, mat_file)) {
 				mat_file << R"#(
 					shader "/pipelines/terrain.shd"
 					texture ")#";
@@ -3423,7 +3423,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		StaticString<LUMIX_MAX_PATH> raw_meta_path(file_info.m_dir, "/", file_info.m_basename, ".raw.meta");
 		os::OutputFile raw_meta_file;
-		if (raw_meta_file.open(raw_meta_path)) {
+		if (fs.open(raw_meta_path, raw_meta_file)) {
 			raw_meta_file << "wrap_mode_u = \"clamp\"\n";
 			raw_meta_file << "wrap_mode_v = \"clamp\"\n";
 			raw_meta_file.close();
@@ -3431,7 +3431,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		StaticString<LUMIX_MAX_PATH> tga_meta_path(file_info.m_dir, "/", file_info.m_basename, ".tga.meta");
 		os::OutputFile tga_meta_file;
-		if (tga_meta_file.open(tga_meta_path)) {
+		if (fs.open(tga_meta_path, tga_meta_file)) {
 			tga_meta_file << "srgb = true\n";
 			tga_meta_file << "wrap_mode_u = \"clamp\"\n";
 			tga_meta_file << "wrap_mode_v = \"clamp\"\n";
