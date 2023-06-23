@@ -1465,7 +1465,7 @@ struct GrassNode : OSMNodeEditor::Node {
 	}
 
 	bool gui() override {
-		ImGuiEx::NodeTitle("Grass");
+		ImGuiEx::NodeTitle("Grass", ImGui::GetColorU32(ImGuiCol_PlotLinesHovered));
 		bool res = ImGui::Checkbox("Additive", &m_additive);
 		i32 g = m_grass;
 		if (ImGui::InputInt("Grass", &g)) {
@@ -2011,7 +2011,7 @@ struct PlaceSplinesNode : OSMNodeEditor::Node {
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override { return {}; }
 	
 	bool gui() override {
-		ImGuiEx::BeginNodeTitleBar();
+		ImGuiEx::BeginNodeTitleBar(ImGui::GetColorU32(ImGuiCol_PlotLinesHovered));
 		ImGui::TextUnformatted("Place splines");
 		ImGui::SameLine();
 		if (ImGui::Button(ICON_FA_PLAY)) run();
@@ -2206,7 +2206,7 @@ struct PlaceInstancesNode : OSMNodeEditor::Node {
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override { return {}; }
 
 	bool gui() override {
-		ImGuiEx::BeginNodeTitleBar();
+		ImGuiEx::BeginNodeTitleBar(ImGui::GetColorU32(ImGuiCol_PlotLinesHovered));
 		ImGui::TextUnformatted("Place instances");
 		ImGui::SameLine();
 		if (ImGui::Button(ICON_FA_PLAY)) run();
@@ -2506,7 +2506,7 @@ struct PaintGroundNode : OSMNodeEditor::Node {
 	}
 
 	bool gui() override {
-		ImGuiEx::BeginNodeTitleBar();
+		ImGuiEx::BeginNodeTitleBar(ImGui::GetColorU32(ImGuiCol_PlotLinesHovered));
 		ImGui::AlignTextToFramePadding();
 		ImGui::TextUnformatted("Paint ground");
 		ImGui::SameLine();
