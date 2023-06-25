@@ -241,6 +241,34 @@ struct DistanceFieldOutput : OutputValue {
 	DistanceFieldOutput(IAllocator& allocator) : m_field(allocator) {}
 	OutputType getType() override { return OutputType::DISTANCE_FIELD; }
 	
+	float sample(float u, float v) const {
+		const float x = u * (m_size - 1);
+		const float y = v * (m_size - 1);
+		
+		const i32 i = i32(x);
+		const i32 j = i32(y);
+
+		i32 idx = i + j * m_size;
+		float rx = x - i;
+		float ry = y - j;
+
+		auto get = [this](i32 i, i32 j){
+			i32 idx = clamp(i, 0, m_size - 1) + clamp(j, 0, m_size - 1) * m_size;
+			return m_field[idx];
+		};
+
+		const float v00 = get(i, j);
+		const float v10 = get(i + 1, j);
+		const float v01 = get(i, j + 1);
+		const float v11 = get(i + 1, j + 1);
+
+		return lerp(
+			lerp(v00, v01, rx),
+			lerp(v01, v11, rx),
+			ry
+		);
+	}
+
 	u32 m_size;
 	Array<float> m_field;
 };
@@ -1478,13 +1506,13 @@ struct GrassNode : OSMNodeEditor::Node {
 
 	bool gui() override {
 		ImGuiEx::NodeTitle("Grass", ImGui::GetColorU32(ImGuiCol_PlotLinesHovered));
+		inputSlot();
 		bool res = ImGui::Checkbox("Additive", &m_additive);
 		i32 g = m_grass;
 		if (ImGui::InputInt("Grass", &g)) {
 			m_grass = g;
 			res = true;
 		}
-		inputSlot();
 		return res;
 	}
 
@@ -1605,9 +1633,8 @@ struct DistanceFieldNode : OSMNodeEditor::Node {
 
 		IAllocator& allocator = m_editor->m_app.getAllocator();
 		UniquePtr<DistanceFieldOutput> df = UniquePtr<DistanceFieldOutput>::create(allocator, allocator);
-		df->m_size = getSplatmapSize(m_editor->m_app);
+		df->m_size = mask->m_size;
 		df->m_field.resize(df->m_size * df->m_size);
-		ASSERT(df->m_size == mask->m_size);
 		
 		Array<IVec2> data_ar(m_editor->m_app.getAllocator());
 
@@ -1736,12 +1763,25 @@ struct AdjustHeightNode  : OSMNodeEditor::Node {
 	NodeType getType() const override { return NodeType::ADJUST_HEIGHT; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return false; }
-	void serialize(OutputMemoryStream& blob) override {}
-	void deserialize(InputMemoryStream& blob) override {}
+
+	void serialize(OutputMemoryStream& blob) override {
+		blob.writeString(m_texture);
+		blob.write(m_texture_scale);
+		blob.write(m_multiplier);
+		blob.write(m_distance_range);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		m_texture = blob.readString();
+		blob.read(m_texture_scale);
+		blob.read(m_multiplier);
+		blob.read(m_distance_range);
+	}
+
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override { return {}; }
 	
 	bool gui() override {
-		ImGuiEx::BeginNodeTitleBar();
+		ImGuiEx::BeginNodeTitleBar(ImGui::GetColorU32(ImGuiCol_PlotLinesHovered));
 		ImGui::AlignTextToFramePadding();
 		ImGui::TextUnformatted("Adjust height");
 		ImGui::SameLine();
@@ -1757,13 +1797,17 @@ struct AdjustHeightNode  : OSMNodeEditor::Node {
 	}
 
 	void run() {
+		// TODO undo/redo
 		UniquePtr<OutputValue> input =  getInput(0);
 		if (!input) return;
 		if (input->getType() != OutputType::DISTANCE_FIELD) return;
 
 		u32 w, h;
-		stbi_uc* rgba = loadTexture(m_texture, w, h, m_editor->m_app);
-		if (!rgba) return;
+		stbi_uc* rgba = nullptr;
+		if (m_texture.data[0]) {
+			rgba = loadTexture(m_texture, w, h, m_editor->m_app);
+			if (!rgba) return;
+		}
 
 		const Terrain* terrain = getSelectedTerrain(m_editor->m_app);
 		if (!terrain) return;
@@ -1785,11 +1829,6 @@ struct AdjustHeightNode  : OSMNodeEditor::Node {
 		}
 
 		DistanceFieldOutput* df = (DistanceFieldOutput*)input.get();
-
-		if (hm->width != df->m_size || hm->height != df->m_size) {
-			logWarning("Heightmap and mask must have the same sizes");
-			return;
-		}
 		u16* hm_data = (u16*)hm->getData();
 
 		auto mix = [](float a, float b, float t) {
@@ -1797,9 +1836,10 @@ struct AdjustHeightNode  : OSMNodeEditor::Node {
 		};
 
 		auto sample = [&](u32 i, u32 j) {
-			const float m = float(m_texture_scale / df->m_size);
-			const float x = i * m;
-			const float y = j * m;
+			if (!rgba) return 1.f;
+
+			const float x = i * float(m_texture_scale / hm->width);
+			const float y = j * float(m_texture_scale / hm->height);
 			const float a = x * w;
 			const float b = y * h;
 			
@@ -1822,12 +1862,17 @@ struct AdjustHeightNode  : OSMNodeEditor::Node {
 			);
 		};
 
-		for (u32 j = 0; j < df->m_size; ++j) {
-			for (u32 i = 0; i < df->m_size; ++i) {
-				const float dist = df->m_field[i + j * df->m_size];
+		const float range = m_distance_range.y - m_distance_range.x;
+		
+		for (u32 j = 0; j < hm->height; ++j) {
+			for (u32 i = 0; i < hm->width; ++i) {
+				const float u = float(i) / (hm->width - 1);
+				const float v = float(j) / (hm->height - 1);
+				const float dist = df->sample(u, 1 - v);
 				if (dist > m_distance_range.x) {
-					const float distance_weight = clamp((dist - m_distance_range.x) / (m_distance_range.y - m_distance_range.x), 0.f, 1.f);
-					const u32 idx = i + (df->m_size - j - 1) * df->m_size;
+					float distance_weight = clamp((dist - m_distance_range.x) / range, 0.f, 1.f);
+					distance_weight *= distance_weight;
+					const u32 idx = i + (hm->height - j - 1) * hm->width;
 					float height = (hm_data[idx] / float(0xffFF));
 					height += sample(i, j) * m_multiplier * distance_weight;
 					hm_data[idx] = (u16)clamp(height * float(0xffFF), 0.f, (float)0xffFF);
@@ -1854,7 +1899,7 @@ struct FlattenPolylinesNode : OSMNodeEditor::Node {
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override { return {}; }
 
 	bool gui() override {
-		ImGuiEx::BeginNodeTitleBar();
+		ImGuiEx::BeginNodeTitleBar(ImGui::GetColorU32(ImGuiCol_PlotLinesHovered));
 		ImGui::TextUnformatted("Flatten polylines");
 		ImGui::SameLine();
 		if (ImGui::Button(ICON_FA_PLAY)) run();
