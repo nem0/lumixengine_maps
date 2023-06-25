@@ -1894,8 +1894,21 @@ struct FlattenPolylinesNode : OSMNodeEditor::Node {
 	NodeType getType() const override { return NodeType::FLATTEN_POLYLINES; }
 	bool hasInputPins() const override { return false; }
 	bool hasOutputPins() const override { return false; }
-	void serialize(OutputMemoryStream& blob) override {}
-	void deserialize(InputMemoryStream& blob) override {}
+	
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(m_line_width);
+		blob.write(m_boundary_width);
+		blob.writeString(m_key);
+		blob.writeString(m_value);
+	}
+	
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(m_line_width);
+		blob.read(m_boundary_width);
+		m_key = blob.readString();
+		m_value = blob.readString();
+	}
+	
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override { return {}; }
 
 	bool gui() override {
@@ -1904,15 +1917,18 @@ struct FlattenPolylinesNode : OSMNodeEditor::Node {
 		ImGui::SameLine();
 		if (ImGui::Button(ICON_FA_PLAY)) run();
 		ImGuiEx::EndNodeTitleBar();
-		return tagInput(Span(m_key.data), Span(m_value.data), 150);
+		bool res = ImGui::DragFloat("Width", &m_line_width);
+		res = ImGui::DragFloat("Boundary", &m_boundary_width) || res;
+		res = tagInput(Span(m_key.data), Span(m_value.data), 150) || res;
+		return res;
 	}
 	
-	Vec2 toSplatmap(const Vec2& p) const {
+	Vec2 toHeightmap(const Vec2& p) const {
 		Vec2 tmp;
 		tmp = p;
 		const Terrain* terrain = getSelectedTerrain(m_editor->m_app);
 		const Vec2 s = terrain->getSize();
-		const u32 size = terrain->getSplatmap()->width;
+		const u32 size = terrain->getHeightmap()->width;
 		tmp.x += s.x * 0.5f; 
 		tmp.y += s.y * 0.5f; 
 	
@@ -1982,7 +1998,7 @@ struct FlattenPolylinesNode : OSMNodeEditor::Node {
 					else {
 						const float h_orig = v * terrain.m_scale.y / 0xffFF;
 						const float h_lerp_t = clamp((center_dist - line_width * 0.5f) / boundary_width, 0.f, 1.f);
-						const float h_lerped = lerp(h, h_orig, h_lerp_t);
+						const float h_lerped = lerp(h, h_orig, h_lerp_t * h_lerp_t);
 						v = u16(h_lerped / terrain.m_scale.y * 0xffFF);
 					}
 				}
@@ -2020,7 +2036,7 @@ struct FlattenPolylinesNode : OSMNodeEditor::Node {
 		ASSERT(terrain.m_heightmap->width == terrain.m_heightmap->height);
 		const float s = terrain.m_heightmap->height / terrain.getSize().x;
 		for (int i = 0; i < 4; ++i) {
-			points[i] = toSplatmap(points[i]) - Vec2(0.5f);
+			points[i] = toHeightmap(points[i]) - Vec2(0.5f);
 		}
 
 		flattenQuad(points, (float)a.y - base_y, (float)b.y - base_y, terrain, line_width * s, boundary_width * s);
