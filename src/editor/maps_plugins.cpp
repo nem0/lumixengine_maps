@@ -858,6 +858,11 @@ static EntityPtr getTerrainEntity(StudioApp& app) {
 
 struct OSMNodeEditor : NodeEditor {
 	struct Node : NodeEditorNode {
+		Node(OSMNodeEditor& editor) 
+			: m_editor(editor)
+			, m_error(editor.m_allocator)
+		{}
+
 		virtual NodeType getType() const = 0;
 		virtual void serialize(OutputMemoryStream& blob) = 0;
 		virtual void deserialize(InputMemoryStream& blob) = 0;
@@ -869,7 +874,16 @@ struct OSMNodeEditor : NodeEditor {
 			m_input_counter = 0;
 			m_output_counter = 0;
 			bool res = gui();
+			
+			if (m_error.length() > 0) {
+				ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(0xff, 0, 0, 0xff));
+			}
 			ImGuiEx::EndNode();
+			if (m_error.length() > 0) {
+				ImGui::PopStyleColor();
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", m_error.c_str());
+			}
+
 			return res;
 		}
 
@@ -904,6 +918,9 @@ struct OSMNodeEditor : NodeEditor {
 			ImGuiEx::EndNodeTitleBar();
 		}
 
+		UniquePtr<OutputValue> outputError(const char* msg) { m_error = msg; return {}; }
+		void error(const char* msg) { m_error = msg; }
+
 		template <int N>
 		bool textureMaskInput(StaticString<N>& texture) {
 			char basename[LUMIX_MAX_PATH];
@@ -915,7 +932,7 @@ struct OSMNodeEditor : NodeEditor {
 				texture = "";
 				return true;
 			}
-			FileSelector& fs = m_editor->m_app.getFileSelector();
+			FileSelector& fs = m_editor.m_app.getFileSelector();
 			if (fs.gui("Select mask texture", &m_show_mask_open, "tga", false)) {
 				texture = fs.getPath();
 				res = true;
@@ -924,23 +941,31 @@ struct OSMNodeEditor : NodeEditor {
 		}
 
 		void previewButton() {
-			EntityPtr terrain = getTerrainEntity(m_editor->m_app);
-			if (!terrain.isValid()) return;
 			ImGui::SameLine();
-			if (ImGui::Button(ICON_FA_SEARCH)) {
+			if (ImGui::Button(ICON_FA_SEARCH) && ensureOSMData()) {
+
 				UniquePtr<OutputValue> out = getOutputValue(0);
 				if (out) {
 					switch(out->getType()) {
-						case OutputType::MASK: m_editor->visualize((MaskOutput*)out.get()); break;
-						case OutputType::DISTANCE_FIELD: m_editor->visualize((DistanceFieldOutput*)out.get()); break;
+						case OutputType::MASK: m_editor.visualize((MaskOutput*)out.get()); break;
+						case OutputType::DISTANCE_FIELD: m_editor.visualize((DistanceFieldOutput*)out.get()); break;
 					}
 				}
 			}
 		}
 
+		bool ensureOSMData() {
+			if (m_editor.m_osm_parser.m_nodes.size() == 0 && m_editor.m_osm_parser.m_ways.size() == 0) {
+				m_editor.m_show_osm_download_dialog = true;
+				return false;
+			}
+			return true;
+		}
+
 		UniquePtr<OutputValue> getInput(u16 input_idx);
 
-		OSMNodeEditor* m_editor;
+		OSMNodeEditor& m_editor;
+		String m_error;
 		u32 m_input_counter;
 		u32 m_output_counter;
 		bool m_selected = false;
@@ -995,6 +1020,37 @@ struct OSMNodeEditor : NodeEditor {
 	}
 
 	void run();
+
+	void colorLinks() {
+		const ImU32 colors[] = {
+			IM_COL32(0x20, 0x20, 0xA0, 0xFF),
+			IM_COL32(0x20, 0xA0, 0x20, 0xFF),
+			IM_COL32(0x20, 0xA0, 0xA0, 0xFF),
+			IM_COL32(0xA0, 0x20, 0x20, 0xFF),
+			IM_COL32(0xA0, 0x20, 0xA0, 0xFF),
+			IM_COL32(0xA0, 0xA0, 0x20, 0xFF),
+			IM_COL32(0xA0, 0xA0, 0xA0, 0xFF),
+		};
+	
+		for (i32 i = 0, c = m_links.size(); i < c; ++i) {
+			NodeEditorLink& l = m_links[i];
+			l.color = colors[i % lengthOf(colors)];
+		}
+	}
+
+	void pushUndo(u32 tag) override {
+		colorLinks();
+		SimpleUndoRedo::pushUndo(tag);
+	}
+
+	TerrainEditor* getTerrainEditor() {
+		for (StudioApp::MousePlugin* p : m_app.getMousePlugins()) {
+			if (equalStrings(p->getName(), "terrain_editor")) {
+				return static_cast<TerrainEditor*>(p);
+			}
+		}
+		return nullptr;
+	}
 
 	void onBeforeSettingsSaved(Settings& settings) {
 		for (const String& p : m_recent_paths) {
@@ -1223,6 +1279,33 @@ struct OSMNodeEditor : NodeEditor {
 
 		const float level_scale = scale * float(256 * (1 << size) * 156543.03 * cos(degreesToRadians(bottom)) / (1 << zoom));
 
+		auto downloadOSMData = [&](){
+			const StaticString<1024> osm_download_path("https://api.openstreetmap.org/api/0.6/map?bbox=", dl_left, ",", dl_bottom, ",", dl_right, ",", dl_top);
+			const StableHash url_hash(osm_download_path.data, stringLength(osm_download_path.data));
+			const Path cache_path(".lumix/maps_cache/osm_", url_hash.getHashValue());
+			FileSystem& fs = m_app.getEngine().getFileSystem();
+			OutputMemoryStream blob(m_allocator);
+			if (fs.fileExists(cache_path) && fs.getContentSync(cache_path, blob)) {
+				if (!m_osm_parser.parseOSM(left, bottom, right, top, level_scale, blob)) {
+					logError("Failed to parse ", osm_download_path);
+				}
+				else {
+					logInfo(osm_download_path, " loaded from cache - ", cache_path);
+				}
+			}
+			else if (download(osm_download_path, blob)) {
+				if (!fs.saveContentSync(cache_path, blob)) {
+					logWarning("Could not save ", cache_path);
+				}
+				if (!m_osm_parser.parseOSM(left, bottom, right, top, level_scale, blob)) {
+					logError("Failed to parse ", osm_download_path);
+				}
+			}
+			else {
+				logError("Failed to download ", osm_download_path);
+			}
+		};
+
 		if (ImGui::BeginMenuBar()) {
 			if (ImGui::BeginMenu("File")) {
 				menuItem(m_save_action, true);
@@ -1239,30 +1322,7 @@ struct OSMNodeEditor : NodeEditor {
 			}
 			if (ImGui::BeginMenu("OSM data")) {
 				if (ImGui::MenuItem(ICON_FA_FILE_DOWNLOAD "Download")) {
-					const StaticString<1024> osm_download_path("https://api.openstreetmap.org/api/0.6/map?bbox=", dl_left, ",", dl_bottom, ",", dl_right, ",", dl_top);
-					const StableHash url_hash(osm_download_path.data, stringLength(osm_download_path.data));
-					const Path cache_path(".lumix/maps_cache/osm_", url_hash.getHashValue());
-					FileSystem& fs = m_app.getEngine().getFileSystem();
-					OutputMemoryStream blob(m_allocator);
-					if (fs.fileExists(cache_path) && fs.getContentSync(cache_path, blob)) {
-						if (!m_osm_parser.parseOSM(left, bottom, right, top, level_scale, blob)) {
-							logError("Failed to parse ", osm_download_path);
-						}
-						else {
-							logInfo(osm_download_path, " loaded from cache - ", cache_path);
-						}
-					}
-					else if (download(osm_download_path, blob)) {
-						if (!fs.saveContentSync(cache_path, blob)) {
-							logWarning("Could not save ", cache_path);
-						}
-						if (!m_osm_parser.parseOSM(left, bottom, right, top, level_scale, blob)) {
-							logError("Failed to parse ", osm_download_path);
-						}
-					}
-					else {
-						logError("Failed to download ", osm_download_path);
-					}
+					downloadOSMData();
 				}
 				ImGui::DragInt("Area edge", &m_area_edge);
 				ImGui::EndMenu();
@@ -1281,6 +1341,21 @@ struct OSMNodeEditor : NodeEditor {
 
 		nodeEditorGUI(m_nodes, m_links);
 		ImGui::EndChild();
+
+		if (m_show_osm_download_dialog) {
+			m_show_osm_download_dialog = false;
+			ImGui::OpenPopup("Download OSM data");
+		}
+		if (ImGui::BeginPopupModal("Download OSM data")) {
+			ImGui::TextUnformatted("OSM data empty");
+			if (ImGui::Button("Download")) {
+				downloadOSMData();
+				ImGui::CloseCurrentPopup();
+			}
+			ImGui::SameLine();
+			if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+			ImGui::EndPopup();
+		}
 	}
 
 	OSMParser m_osm_parser;
@@ -1298,6 +1373,7 @@ struct OSMNodeEditor : NodeEditor {
 	i32 m_area_edge = 0;
 	bool m_show_save_as = false;
 	bool m_show_open = false;
+	bool m_show_osm_download_dialog = false;
 	Path m_path;
 	ImTextureID m_preview_texture = (ImTextureID)(intptr_t)0xffFFffFF;
 	bool m_show_preview = false;
@@ -1320,7 +1396,7 @@ static void	forEachInput(const OSMNodeEditor& resource, int node_id, const F& f)
 UniquePtr<OutputValue> OSMNodeEditor::Node::getInput(u16 input_idx) {
 	Node* node = nullptr;
 	u16 output_idx = 0;
-	forEachInput(*m_editor, m_id, [&](Node* from, u16 from_attr, u16 to_attr, u32 link_idx){
+	forEachInput(m_editor, m_id, [&](Node* from, u16 from_attr, u16 to_attr, u32 link_idx){
 		if (to_attr == input_idx) {
 			output_idx = from_attr;
 			node = from;
@@ -1449,32 +1525,35 @@ static u32 getSplatmapSize(StudioApp& app) {
 }
 
 struct GrassNode : OSMNodeEditor::Node {
+	GrassNode(OSMNodeEditor& editor)
+		: Node(editor)
+	{}
+
 	NodeType getType() const override { return NodeType::GRASS; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return false; }
 	void serialize(OutputMemoryStream& blob) override {}
 	void deserialize(InputMemoryStream& blob) override {}
-	
+
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override { ASSERT(false); return {}; }
-	
+
 	void run() {
+		if (!ensureOSMData()) return;
+
 		UniquePtr<OutputValue> input = getInput(0);
-		if (!input) return;
-		if (input->getType() != OutputType::MASK) return;
+		if (!input) return error("Invalid input");
+		if (input->getType() != OutputType::MASK) return error("Invalid input");
 		const MaskOutput* mask = (MaskOutput*)input.get();
 
-		Terrain* terrain = getSelectedTerrain(m_editor->m_app);
-		if (!terrain) return;
+		TerrainEditor* terrain_editor = m_editor.getTerrainEditor();
+		if (!terrain_editor) return error("Terrain editor not found");
+
+		Terrain* terrain = terrain_editor->getTerrain();
+		if (!terrain) return error("Terrain not found");
 
 		Texture* splatmap = terrain->getSplatmap();
-		if (!splatmap) {
-			logWarning("Missing splatmap");
-			return;
-		}
-		if (!splatmap->isReady()) {
-			logWarning("Splatmap not ready");
-			return;
-		}
+		if (!splatmap) return error("Missing splatmap");
+		if (!splatmap->isReady()) return error("Splatmap not ready");
 
 		auto is_masked = [&](u32 x, u32 y){
 			u32 i = u32(x / float(splatmap->width) * mask->m_size + 0.5f);
@@ -1485,7 +1564,10 @@ struct GrassNode : OSMNodeEditor::Node {
 			return mask->m_bitmap[i + j * mask->m_size] != 0;
 		};
 
-		u8* data = splatmap->getData();
+		OutputMemoryStream new_data(m_editor.m_allocator);
+		new_data.resize(splatmap->height * splatmap->width * 4);
+		u8* data = new_data.getMutableData();
+		memcpy(data, splatmap->getData(), new_data.size());
 		for (u32 y = 0; y < splatmap->height; ++y) {
 			for (u32 x = 0; x < splatmap->width; ++x) {
 				if (is_masked(x, y)) {
@@ -1500,8 +1582,8 @@ struct GrassNode : OSMNodeEditor::Node {
 				}
 			}
 		}
-		splatmap->onDataUpdated(0, 0, splatmap->width, splatmap->height);
-		terrain->setGrassDirty();
+
+		terrain_editor->updateSplatmap(static_cast<OutputMemoryStream&&>(new_data), 0, 0, splatmap->width, splatmap->height, true);
 	}
 
 	bool gui() override {
@@ -1521,6 +1603,10 @@ struct GrassNode : OSMNodeEditor::Node {
 };
 
 struct MergeDistanceFieldsNode : OSMNodeEditor::Node {
+	MergeDistanceFieldsNode(OSMNodeEditor& editor)
+		: Node(editor)
+	{}
+
 	NodeType getType() const override { return NodeType::MERGE_DISTANCE_FIELDS; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return true; }
@@ -1531,13 +1617,13 @@ struct MergeDistanceFieldsNode : OSMNodeEditor::Node {
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
 		UniquePtr<OutputValue> input0 = getInput(0);
 		UniquePtr<OutputValue> input1 = getInput(1);
-		if (!input0) return {};
-		if (!input1) return {};
-		if (input0->getType() != OutputType::DISTANCE_FIELD) return {};
-		if (input1->getType() != OutputType::DISTANCE_FIELD) return {};
+		if (!input0) return outputError("Invalid input");
+		if (!input1) return outputError("Invalid input");
+		if (input0->getType() != OutputType::DISTANCE_FIELD) return outputError("Invalid input");
+		if (input1->getType() != OutputType::DISTANCE_FIELD) return outputError("Invalid input");
 		DistanceFieldOutput* df0 = (DistanceFieldOutput*)input0.get();
 		DistanceFieldOutput* df1 = (DistanceFieldOutput*)input1.get();
-		if (df0->m_size != df1->m_size) return {};
+		if (df0->m_size != df1->m_size) return outputError("Distance fields have different size");
 
 		for (u32 i = 0, c = df0->m_field.size(); i < c; ++i) {
 			df0->m_field[i] = minimum(df0->m_field[i], df1->m_field[i]);
@@ -1559,6 +1645,10 @@ struct MergeDistanceFieldsNode : OSMNodeEditor::Node {
 };
 
 struct MergeMasksNode : OSMNodeEditor::Node {
+	MergeMasksNode(OSMNodeEditor& editor)
+		: Node(editor)
+	{}
+
 	NodeType getType() const override { return NodeType::MERGE_MASKS; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return true; }
@@ -1574,10 +1664,10 @@ struct MergeMasksNode : OSMNodeEditor::Node {
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
 		UniquePtr<OutputValue> input0 = getInput(0);
 		UniquePtr<OutputValue> input1 = getInput(1);
-		if (!input0) return {};
-		if (!input1) return {};
-		if (input0->getType() != OutputType::MASK) return {};
-		if (input1->getType() != OutputType::MASK) return {};
+		if (!input0) return outputError("Invalid input");
+		if (!input1) return outputError("Invalid input");
+		if (input0->getType() != OutputType::MASK) return outputError("Invalid input");
+		if (input1->getType() != OutputType::MASK) return outputError("Invalid input");
 		MaskOutput* mask0 = (MaskOutput*)input0.get();
 		MaskOutput* mask1 = (MaskOutput*)input1.get();
 
@@ -1625,18 +1715,22 @@ struct MergeMasksNode : OSMNodeEditor::Node {
 };
 
 struct DistanceFieldNode : OSMNodeEditor::Node {
+	DistanceFieldNode(OSMNodeEditor& editor)
+		: Node(editor)
+	{}
+
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
 		UniquePtr<OutputValue> input = getInput(0);
-		if (!input) return {};
-		if (input->getType() != OutputType::MASK) return {};
+		if (!input) return outputError("Invalid input");
+		if (input->getType() != OutputType::MASK) return outputError("Invalid input");
 		MaskOutput* mask = (MaskOutput*)input.get();
 
-		IAllocator& allocator = m_editor->m_app.getAllocator();
+		IAllocator& allocator = m_editor.m_app.getAllocator();
 		UniquePtr<DistanceFieldOutput> df = UniquePtr<DistanceFieldOutput>::create(allocator, allocator);
 		df->m_size = mask->m_size;
 		df->m_field.resize(df->m_size * df->m_size);
 		
-		Array<IVec2> data_ar(m_editor->m_app.getAllocator());
+		Array<IVec2> data_ar(m_editor.m_app.getAllocator());
 
 		const u32 w = df->m_size;
 		const u32 h = df->m_size;
@@ -1760,6 +1854,10 @@ struct DistanceFieldNode : OSMNodeEditor::Node {
 };
 
 struct AdjustHeightNode  : OSMNodeEditor::Node {
+	AdjustHeightNode(OSMNodeEditor& editor)
+		: Node(editor)
+	{}
+
 	NodeType getType() const override { return NodeType::ADJUST_HEIGHT; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return false; }
@@ -1797,39 +1895,37 @@ struct AdjustHeightNode  : OSMNodeEditor::Node {
 	}
 
 	void run() {
-		// TODO undo/redo
+		if (!ensureOSMData()) return;
+
 		UniquePtr<OutputValue> input =  getInput(0);
-		if (!input) return;
-		if (input->getType() != OutputType::DISTANCE_FIELD) return;
+		if (!input) return error("Invalid input");
+		if (input->getType() != OutputType::DISTANCE_FIELD) return error("Invalid input");
 
 		u32 w, h;
 		stbi_uc* rgba = nullptr;
 		if (m_texture.data[0]) {
-			rgba = loadTexture(m_texture, w, h, m_editor->m_app);
-			if (!rgba) return;
+			rgba = loadTexture(m_texture, w, h, m_editor.m_app);
+			if (!rgba) return error("Failed to load the texture");
 		}
 
-		const Terrain* terrain = getSelectedTerrain(m_editor->m_app);
-		if (!terrain) return;
+		const Terrain* terrain = getSelectedTerrain(m_editor.m_app);
+		if (!terrain) return error("No terrain selected");
+		
+		DistanceFieldOutput* df = (DistanceFieldOutput*)input.get();
+		TerrainEditor* terrain_editor = m_editor.getTerrainEditor();
+		if (!terrain_editor) return error("Terrain editor not found");
 		
 		Texture* hm = terrain->getHeightmap();
-		if (!hm) {
-			logWarning("Missing heightmap");
-			return;
-		}
+		if (!hm) return error("Missing heightmap");
+		if (hm->format != gpu::TextureFormat::R16) return error("Heightmap format not supported");
 		
-		if (!hm->isReady()) {
-			logWarning("Heightmap ", hm->getPath(), " not ready");
-			return;
-		}
+		const u16* src_data = (const u16*)hm->getData();
+		if (!src_data) return error("Could not read heightmap data");
 
-		if (hm->format != gpu::TextureFormat::R16) {
-			logWarning("Heightmap format not supported");
-			return;
-		}
-
-		DistanceFieldOutput* df = (DistanceFieldOutput*)input.get();
-		u16* hm_data = (u16*)hm->getData();
+		OutputMemoryStream new_data(m_editor.m_allocator);
+		new_data.resize(hm->width * hm->height * 2);
+		u16* hm_data = (u16*)new_data.getMutableData();
+		memcpy(hm_data, src_data, new_data.size());
 
 		auto mix = [](float a, float b, float t) {
 			return a * (1 - t) + b * t;
@@ -1880,7 +1976,7 @@ struct AdjustHeightNode  : OSMNodeEditor::Node {
 			}
 		}
 
-		hm->onDataUpdated(0, 0, hm->width, hm->height);
+		terrain_editor->updateHeightmap(static_cast<OutputMemoryStream&&>(new_data), 0, 0, hm->width, hm->height);
 		stbi_image_free(rgba);
 	}
 
@@ -1891,6 +1987,10 @@ struct AdjustHeightNode  : OSMNodeEditor::Node {
 };
 
 struct FlattenPolylinesNode : OSMNodeEditor::Node {
+	FlattenPolylinesNode(OSMNodeEditor& editor)
+		: Node(editor)
+	{}
+
 	NodeType getType() const override { return NodeType::FLATTEN_POLYLINES; }
 	bool hasInputPins() const override { return false; }
 	bool hasOutputPins() const override { return false; }
@@ -1926,7 +2026,7 @@ struct FlattenPolylinesNode : OSMNodeEditor::Node {
 	Vec2 toHeightmap(const Vec2& p) const {
 		Vec2 tmp;
 		tmp = p;
-		const Terrain* terrain = getSelectedTerrain(m_editor->m_app);
+		const Terrain* terrain = getSelectedTerrain(m_editor.m_app);
 		const Vec2 s = terrain->getSize();
 		const u32 size = terrain->getHeightmap()->width;
 		tmp.x += s.x * 0.5f; 
@@ -2010,7 +2110,7 @@ struct FlattenPolylinesNode : OSMNodeEditor::Node {
 		ASSERT(terrain.m_heightmap->format == gpu::TextureFormat::R16);
 		ASSERT(terrain.m_splatmap);
 
-		const float base_y = (float)m_editor->m_app.getWorldEditor().getWorld()->getPosition(terrain.m_entity).y;
+		const float base_y = (float)m_editor.m_app.getWorldEditor().getWorld()->getPosition(terrain.m_entity).y;
 
 		const Vec2 a2d = Vec3(a).xz();
 		const Vec2 b2d = Vec3(b).xz();
@@ -2043,18 +2143,20 @@ struct FlattenPolylinesNode : OSMNodeEditor::Node {
 	}
 
 	void run() {
-		Array<DVec3> polyline(m_editor->m_app.getAllocator());
-		const EntityPtr terrain_entity = getTerrainEntity(m_editor->m_app);
-		if (!terrain_entity.isValid()) return;
-		const Terrain* terrain = getSelectedTerrain(m_editor->m_app);
-		if (!terrain->m_heightmap) return;
-		if (!terrain->m_heightmap->isReady()) return;
+		if (!ensureOSMData()) return;
 
-		for (pugi::xml_node& w : m_editor->m_osm_parser.m_ways) {
+		Array<DVec3> polyline(m_editor.m_app.getAllocator());
+		const EntityPtr terrain_entity = getTerrainEntity(m_editor.m_app);
+		if (!terrain_entity.isValid()) return error("No terrain selected");
+		const Terrain* terrain = getSelectedTerrain(m_editor.m_app);
+		if (!terrain->m_heightmap) return error("Missing heightmap");
+		if (!terrain->m_heightmap->isReady()) return error("Heightmap not ready");
+
+		for (pugi::xml_node& w : m_editor.m_osm_parser.m_ways) {
 			if (!OSMParser::hasTag(w, m_key, m_value)) continue;
 
 			polyline.clear();
-			m_editor->m_osm_parser.getWay(w, (EntityRef)terrain_entity, polyline);
+			m_editor.m_osm_parser.getWay(w, (EntityRef)terrain_entity, polyline);
 
 			for (i32 i = 0; i < polyline.size() - 1; ++i) {
 				flattenLine(polyline[i > 0 ? i - 1 : 0],
@@ -2076,6 +2178,10 @@ struct FlattenPolylinesNode : OSMNodeEditor::Node {
 };
 
 struct PlaceSplinesNode : OSMNodeEditor::Node {
+	PlaceSplinesNode(OSMNodeEditor& editor)
+		: Node(editor)
+	{}
+
 	NodeType getType() const override { return NodeType::PLACE_SPLINES; }
 	bool hasInputPins() const override { return false; }
 	bool hasOutputPins() const override { return false; }
@@ -2093,26 +2199,28 @@ struct PlaceSplinesNode : OSMNodeEditor::Node {
 	}
 
 	void run() {
-		StudioApp& app = m_editor->m_app;
+		if (!ensureOSMData()) return;
+
+		StudioApp& app = m_editor.m_app;
 
 		Array<DVec3> polyline(app.getAllocator());
 		const EntityPtr terrain_entity = getTerrainEntity(app);
-		if (!terrain_entity.isValid()) return;
+		if (!terrain_entity.isValid()) return error("No terrain selected");
 
 		const Terrain* terrain = getSelectedTerrain(app);
-		if (!terrain->m_heightmap) return;
-		if (!terrain->m_heightmap->isReady()) return;
+		if (!terrain->m_heightmap) return error("Missing heightmap");
+		if (!terrain->m_heightmap->isReady()) return error("Heightmap not ready");
 
 		WorldEditor& editor = app.getWorldEditor();
 		
 		editor.beginCommandGroup("place_splines");
 		SplineEditor* spline_editor = static_cast<SplineEditor*>(app.getIPlugin("spline_editor"));
 		Array<Vec3> points(app.getAllocator());
-		for (pugi::xml_node& w : m_editor->m_osm_parser.m_ways) {
+		for (pugi::xml_node& w : m_editor.m_osm_parser.m_ways) {
 			if (!OSMParser::hasTag(w, m_key, m_value)) continue;
 	
 			polyline.clear();
-			m_editor->m_osm_parser.getWay(w, (EntityRef)terrain_entity, polyline);
+			m_editor.m_osm_parser.getWay(w, (EntityRef)terrain_entity, polyline);
 			if (polyline.size() < 3) continue;
 	
 			const EntityRef entity = editor.addEntityAt(polyline[0]);
@@ -2137,8 +2245,9 @@ struct PlaceSplinesNode : OSMNodeEditor::Node {
 };
 
 struct PlaceInstancesNode : OSMNodeEditor::Node {
-	PlaceInstancesNode(IAllocator& allocator)
-		: m_models(allocator)
+	PlaceInstancesNode(OSMNodeEditor& editor)
+		: Node(editor)
+		, m_models(editor.m_allocator)
 	{}
 
 	~PlaceInstancesNode() {
@@ -2164,7 +2273,7 @@ struct PlaceInstancesNode : OSMNodeEditor::Node {
 	}
 
 	void deserialize(InputMemoryStream& blob) override {
-		ResourceManagerHub& rm = m_editor->m_app.getEngine().getResourceManager();
+		ResourceManagerHub& rm = m_editor.m_app.getEngine().getResourceManager();
 		blob.read(m_spacing);
 		u32 count;
 		blob.read(count);
@@ -2185,16 +2294,19 @@ struct PlaceInstancesNode : OSMNodeEditor::Node {
 	}
 
 	void run() {
+		if (!ensureOSMData()) return;
+
 		UniquePtr<OutputValue> input = getInput(0);
-		if (!input) return;
+		if (!input) return error("Invalid input");
 
 		DistanceFieldOutput* df = (DistanceFieldOutput*)input.get();
 
-		WorldEditor& editor = m_editor->m_app.getWorldEditor();
+		WorldEditor& editor = m_editor.m_app.getWorldEditor();
 		World* world = editor.getWorld();
 		RenderModule* render_module = (RenderModule*)world->getModule(TERRAIN_TYPE);
-		EntityPtr terrain_entity = getTerrainEntity(m_editor->m_app);
-		if (!terrain_entity) return;
+		EntityPtr terrain_entity = getTerrainEntity(m_editor.m_app);
+		if (!terrain_entity) return error("No terrain selected");
+
 		const DVec3 terrain_pos = world->getPosition(*terrain_entity);
 	
 		struct Group {
@@ -2202,7 +2314,7 @@ struct PlaceInstancesNode : OSMNodeEditor::Node {
 			InstancedModel* im;
 		};
 	
-		StackArray<Group, 64> groups(m_editor->m_app.getAllocator());
+		StackArray<Group, 64> groups(m_editor.m_app.getAllocator());
 		editor.beginCommandGroup("maps_place_instances");
 		for (const ModelProbability& m : m_models) {
 			const EntityRef e = editor.addEntity();
@@ -2293,10 +2405,10 @@ struct PlaceInstancesNode : OSMNodeEditor::Node {
 				if (ImGui::TreeNode(&mp, "%d", u32(&mp - m_models.begin()))) {
 					char path[LUMIX_MAX_PATH];
 					copyString(path, mp.resource ? mp.resource->getPath().c_str() : "");
-					if (m_editor->m_app.getAssetBrowser().resourceInput("model", Span(path), Model::TYPE, 150)) {
+					if (m_editor.m_app.getAssetBrowser().resourceInput("model", Span(path), Model::TYPE, 150)) {
 						res = true;
 						if (mp.resource) mp.resource->decRefCount();
-						ResourceManagerHub& rm = m_editor->m_app.getEngine().getResourceManager();
+						ResourceManagerHub& rm = m_editor.m_app.getEngine().getResourceManager();
 						mp.resource = rm.load<Model>(Path(path));
 					}
 					res = ImGui::DragFloat4("Distances", &mp.distances.x) || res;
@@ -2327,6 +2439,10 @@ struct PlaceInstancesNode : OSMNodeEditor::Node {
 };
 
 struct NoiseNode : OSMNodeEditor::Node {
+	NoiseNode(OSMNodeEditor& editor)
+		: Node(editor)
+	{}
+
 	NodeType getType() const override { return NodeType::NOISE; }
 	bool hasInputPins() const override { return false; }
 	bool hasOutputPins() const override { return true; }
@@ -2342,11 +2458,11 @@ struct NoiseNode : OSMNodeEditor::Node {
 	}
 
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
-		if (!getSelectedTerrain(m_editor->m_app)) return {};
+		if (!getSelectedTerrain(m_editor.m_app)) return outputError("No terrain selected");
 
-		IAllocator& allocator = m_editor->m_app.getAllocator();
+		IAllocator& allocator = m_editor.m_app.getAllocator();
 		UniquePtr<MaskOutput> output = UniquePtr<MaskOutput>::create(allocator, allocator);
-		output->m_size = getSplatmapSize(m_editor->m_app);
+		output->m_size = getSplatmapSize(m_editor.m_app);
 		output->m_bitmap.resize(output->m_size * output->m_size);
 		memset(output->m_bitmap.begin(), 0, output->m_bitmap.byte_size());
 		MaskOutput* mask = (MaskOutput*)output.get();
@@ -2374,6 +2490,10 @@ struct NoiseNode : OSMNodeEditor::Node {
 };
 
 struct MaskDistanceNode : OSMNodeEditor::Node {
+	MaskDistanceNode(OSMNodeEditor& editor)
+		: Node(editor)
+	{}
+
 	NodeType getType() const override { return NodeType::MASK_DISTANCE; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return true; }
@@ -2389,12 +2509,12 @@ struct MaskDistanceNode : OSMNodeEditor::Node {
 	
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
 		const UniquePtr<OutputValue> input = getInput(output_idx);
-		if (!input) return {};
-		if (input->getType() != OutputType::DISTANCE_FIELD) return {};
+		if (!input) return outputError("Invalid input");
+		if (input->getType() != OutputType::DISTANCE_FIELD) return outputError("Invalid input");
 		
 		DistanceFieldOutput* df = (DistanceFieldOutput*)input.get();
 
-		IAllocator& allocator = m_editor->m_app.getAllocator();
+		IAllocator& allocator = m_editor.m_app.getAllocator();
 		UniquePtr<MaskOutput> output = UniquePtr<MaskOutput>::create(allocator, allocator);
 		output->m_size = df->m_size;
 		output->m_bitmap.resize(output->m_size * output->m_size);
@@ -2414,6 +2534,10 @@ struct MaskDistanceNode : OSMNodeEditor::Node {
 };
 
 struct MaskTextureNode : OSMNodeEditor::Node {
+	MaskTextureNode(OSMNodeEditor& editor)
+		: Node(editor)
+	{}
+
 	NodeType getType() const override { return NodeType::MASK_TEXTURE; }
 	bool hasInputPins() const override { return false; }
 	bool hasOutputPins() const override { return true; }
@@ -2465,16 +2589,13 @@ struct MaskTextureNode : OSMNodeEditor::Node {
 	}
 	
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
-		IAllocator& allocator = m_editor->m_app.getAllocator();
+		IAllocator& allocator = m_editor.m_app.getAllocator();
 		UniquePtr<MaskOutput> output = UniquePtr<MaskOutput>::create(allocator, allocator);
-		output->m_size = getSplatmapSize(m_editor->m_app);
+		output->m_size = getSplatmapSize(m_editor.m_app);
 		output->m_bitmap.resize(output->m_size * output->m_size);
 		u32 mask_w, mask_h;
-		stbi_uc* mask = loadTexture(m_texture, mask_w, mask_h, m_editor->m_app);
-		if (!mask) {
-			logError("Failed to load ", m_texture);
-			return {};
-		}
+		stbi_uc* mask = loadTexture(m_texture, mask_w, mask_h, m_editor.m_app);
+		if (!mask) return outputError("Failed to load the texture");
 
 		u8* out = output->m_bitmap.begin();
 		const Vec2 rand_offset(randFloat(0, float(mask_w)), randFloat(0, float(mask_h)));
@@ -2496,6 +2617,10 @@ struct MaskTextureNode : OSMNodeEditor::Node {
 };
 
 struct InvertNode : OSMNodeEditor::Node {
+	InvertNode(OSMNodeEditor& editor)
+		: Node(editor)
+	{}
+
 	NodeType getType() const override { return NodeType::INVERT; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return true; }
@@ -2504,8 +2629,8 @@ struct InvertNode : OSMNodeEditor::Node {
 
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
 		UniquePtr<OutputValue> input = getInput(0);
-		if (!input) return {};
-		if (input->getType() != OutputType::MASK) return {};
+		if (!input) return outputError("Invalid input");
+		if (input->getType() != OutputType::MASK) return outputError("Invalid input");
 		MaskOutput* mask = (MaskOutput*)input.get();
 
 		for (u8& v : mask->m_bitmap) v = v ? 0 : 1;
@@ -2522,6 +2647,10 @@ struct InvertNode : OSMNodeEditor::Node {
 };
 
 struct PaintGroundNode : OSMNodeEditor::Node {
+	PaintGroundNode(OSMNodeEditor& editor)
+		: Node(editor)
+	{}
+
 	NodeType getType() const override { return NodeType::PAINT_GROUND; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return false; }
@@ -2536,24 +2665,22 @@ struct PaintGroundNode : OSMNodeEditor::Node {
 
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override { ASSERT(false); return {nullptr, nullptr}; }
 
-	bool run() {
+	void run() {
+		if (!ensureOSMData()) return;
+
 		const UniquePtr<OutputValue> val = getInput(0);
-		if (!val) return false;
-		if (val->getType() != OutputType::MASK) return false;
+		if (!val) return error("Invalid input");
+		if (val->getType() != OutputType::MASK) return error("Invalid input");
 		const MaskOutput* mask = (MaskOutput*)val.get();
 
-		const Terrain* terrain = getSelectedTerrain(m_editor->m_app);
-		if (!terrain) return false;
+		const Terrain* terrain = getSelectedTerrain(m_editor.m_app);
+		if (!terrain) return error("No terrain selected");
 		
+		TerrainEditor* terrain_editor = m_editor.getTerrainEditor();
+		if (!terrain_editor) return error("Terrain editor not found");
+
 		Texture* splatmap = terrain->getSplatmap();
-		if (!splatmap) {
-			logWarning("Missing splatmap");
-			return false;
-		}
-		if(!splatmap->isReady()) {
-			logWarning("Splatmap not ready");
-			return false;
-		}
+		if (!splatmap) return error("Missing splatmap");
 		
 		auto is_masked = [&](u32 x, u32 y){
 			u32 i = u32(x / float(splatmap->width) * mask->m_size);
@@ -2564,7 +2691,11 @@ struct PaintGroundNode : OSMNodeEditor::Node {
 			return mask->m_bitmap[i + j * mask->m_size] != 0;
 		};
 
-		u8* data = splatmap->getData();
+		OutputMemoryStream new_data(m_editor.m_allocator);
+		new_data.resize(splatmap->height * splatmap->width * 4);
+		u8* data = new_data.getMutableData();
+		memcpy(data, splatmap->getData(), new_data.size());
+
 		for (u32 y = 0; y < splatmap->height; ++y) {
 			for (u32 x = 0; x < splatmap->width; ++x) {
 				if (is_masked(x, y)) {
@@ -2574,8 +2705,7 @@ struct PaintGroundNode : OSMNodeEditor::Node {
 				}
 			}
 		}
-		splatmap->onDataUpdated(0, 0, splatmap->width, splatmap->height);
-		return true;
+		terrain_editor->updateSplatmap(static_cast<OutputMemoryStream&&>(new_data), 0, 0, splatmap->width, splatmap->height, false);
 	}
 
 	bool gui() override {
@@ -2593,10 +2723,14 @@ struct PaintGroundNode : OSMNodeEditor::Node {
 };
 
 struct MaskBaseNode : OSMNodeEditor::Node {
+	MaskBaseNode(OSMNodeEditor& editor)
+		: Node(editor)
+	{}
+	
 	DVec2 toBitmap(const DVec2& p, u32 size) const {
 		DVec2 tmp;
 		tmp = p;
-		const Terrain* terrain = getSelectedTerrain(m_editor->m_app);
+		const Terrain* terrain = getSelectedTerrain(m_editor.m_app);
 		const Vec2 s = terrain->getSize();
 	
 		tmp.x += s.x * 0.5f; 
@@ -2610,7 +2744,7 @@ struct MaskBaseNode : OSMNodeEditor::Node {
 	Vec2 toBitmap(const Vec2& p, u32 size) const {
 		Vec2 tmp;
 		tmp = p;
-		const Terrain* terrain = getSelectedTerrain(m_editor->m_app);
+		const Terrain* terrain = getSelectedTerrain(m_editor.m_app);
 		const Vec2 s = terrain->getSize();
 		tmp.x += s.x * 0.5f; 
 		tmp.y += s.y * 0.5f; 
@@ -2621,11 +2755,11 @@ struct MaskBaseNode : OSMNodeEditor::Node {
 	}
 
 	UniquePtr<MaskOutput> createOutput() {
-		if (!getSelectedTerrain(m_editor->m_app)) return {};
+		if (!getSelectedTerrain(m_editor.m_app)) return outputError("No terrain selected");
 
-		IAllocator& allocator = m_editor->m_app.getAllocator();
+		IAllocator& allocator = m_editor.m_app.getAllocator();
 		UniquePtr<MaskOutput> output = UniquePtr<MaskOutput>::create(allocator, allocator);
-		output->m_size = getSplatmapSize(m_editor->m_app);
+		output->m_size = getSplatmapSize(m_editor.m_app);
 		output->m_bitmap.resize(output->m_size * output->m_size);
 		memset(output->m_bitmap.begin(), 0, output->m_bitmap.byte_size());
 		return output.move();
@@ -2641,6 +2775,10 @@ struct MaskBaseNode : OSMNodeEditor::Node {
 };
 
 struct MaskPolylinesNode : MaskBaseNode {
+	MaskPolylinesNode(OSMNodeEditor& editor)
+		: MaskBaseNode(editor)
+	{}
+
 	NodeType getType() const override { return NodeType::MASK_POLYLINES; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return true; }
@@ -2658,16 +2796,16 @@ struct MaskPolylinesNode : MaskBaseNode {
 	}
 
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
-		StudioApp& app = m_editor->m_app;
+		StudioApp& app = m_editor.m_app;
 		Array<DVec2> polyline(app.getAllocator());
 		UniquePtr<MaskOutput> output = createOutput();
 		if (!output.get()) return output;
 
-		for (pugi::xml_node& w : m_editor->m_osm_parser.m_ways) {
+		for (pugi::xml_node& w : m_editor.m_osm_parser.m_ways) {
 			if (!OSMParser::hasTag(w, m_key, m_value)) continue;
 
 			polyline.clear();
-			m_editor->m_osm_parser.getWay(w, polyline);
+			m_editor.m_osm_parser.getWay(w, polyline);
 			for (i32 i = 0; i < polyline.size() - 1; ++i) {
 				const DVec2 dir = normalize(polyline[i + 1] - polyline[i]) * 0.5 * double(m_width);
 				const DVec2 n = DVec2(dir.y, -dir.x);
@@ -2693,6 +2831,10 @@ struct MaskPolylinesNode : MaskBaseNode {
 };
 
 struct MaskPolygonsNode : MaskBaseNode {
+	MaskPolygonsNode(OSMNodeEditor& editor)
+		: MaskBaseNode(editor)
+	{}
+
 	NodeType getType() const override { return NodeType::MASK_POLYGONS; }
 	bool hasInputPins() const override { return false; }
 	bool hasOutputPins() const override { return true; }
@@ -2708,7 +2850,7 @@ struct MaskPolygonsNode : MaskBaseNode {
 	}
 
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override {
-		StudioApp& app = m_editor->m_app;
+		StudioApp& app = m_editor.m_app;
 		Array<DVec2> polygon(app.getAllocator());
 		Array<Vec2> points(app.getAllocator());
 
@@ -2716,10 +2858,10 @@ struct MaskPolygonsNode : MaskBaseNode {
 		if (!output.get()) return output;
 
 		Multipolygon2D multipolygon(app.getAllocator());
-		for (pugi::xml_node& r : m_editor->m_osm_parser.m_relations) {
+		for (pugi::xml_node& r : m_editor.m_osm_parser.m_relations) {
 			if (!OSMParser::hasTag(r,m_key, m_value)) continue;
 			
-			m_editor->m_osm_parser.getMultipolygon(r, multipolygon);
+			m_editor.m_osm_parser.getMultipolygon(r, multipolygon);
 
 			for (const Polygon2D& poly : multipolygon.outer_polygons) {
 				points.clear();
@@ -2740,12 +2882,12 @@ struct MaskPolygonsNode : MaskBaseNode {
 			}
 		}
 
-		for (pugi::xml_node& w : m_editor->m_osm_parser.m_ways) {
+		for (pugi::xml_node& w : m_editor.m_osm_parser.m_ways) {
 			if (!OSMParser::hasTag(w, m_key, m_value)) continue;
 
 			polygon.clear();
 			points.clear();
-			m_editor->m_osm_parser.getWay(w, polygon);
+			m_editor.m_osm_parser.getWay(w, polygon);
 
 			for (const DVec2 p : polygon) {
 				DVec2 tmp = toBitmap(p, output->m_size);
@@ -2765,6 +2907,8 @@ struct MaskPolygonsNode : MaskBaseNode {
 };
 
 void OSMNodeEditor::run() {
+	for (Node* node : m_nodes) node->m_error = "";
+	
 	if (!getSelectedTerrain(m_app)) return;
 
 	for (Node* node : m_nodes) {
@@ -2793,23 +2937,22 @@ void OSMNodeEditor::run() {
 OSMNodeEditor::Node* OSMNodeEditor::addNode(NodeType type, ImVec2 pos, bool save_undo) {
 	Node* node = nullptr;
 	switch(type) {
-		case NodeType::MASK_POLYLINES: node = LUMIX_NEW(m_allocator, MaskPolylinesNode); break;
-		case NodeType::MASK_POLYGONS: node = LUMIX_NEW(m_allocator, MaskPolygonsNode); break;
-		case NodeType::PAINT_GROUND: node = LUMIX_NEW(m_allocator, PaintGroundNode); break;
-		case NodeType::INVERT: node = LUMIX_NEW(m_allocator, InvertNode); break;
-		case NodeType::GRASS: node = LUMIX_NEW(m_allocator, GrassNode); break;
-		case NodeType::NOISE: node = LUMIX_NEW(m_allocator, NoiseNode); break;
-		case NodeType::MASK_TEXTURE: node = LUMIX_NEW(m_allocator, MaskTextureNode); break;
-		case NodeType::MERGE_MASKS: node = LUMIX_NEW(m_allocator, MergeMasksNode); break;
-		case NodeType::DISTANCE_FIELD: node = LUMIX_NEW(m_allocator, DistanceFieldNode); break;
-		case NodeType::PLACE_INSTANCES: node = LUMIX_NEW(m_allocator, PlaceInstancesNode)(m_allocator); break;
-		case NodeType::PLACE_SPLINES: node = LUMIX_NEW(m_allocator, PlaceSplinesNode); break;
-		case NodeType::ADJUST_HEIGHT: node = LUMIX_NEW(m_allocator, AdjustHeightNode); break;
-		case NodeType::FLATTEN_POLYLINES: node = LUMIX_NEW(m_allocator, FlattenPolylinesNode); break;
-		case NodeType::MASK_DISTANCE: node = LUMIX_NEW(m_allocator, MaskDistanceNode); break;
-		case NodeType::MERGE_DISTANCE_FIELDS: node = LUMIX_NEW(m_allocator, MergeDistanceFieldsNode); break;
+		case NodeType::MASK_POLYLINES: node = LUMIX_NEW(m_allocator, MaskPolylinesNode)(*this); break;
+		case NodeType::MASK_POLYGONS: node = LUMIX_NEW(m_allocator, MaskPolygonsNode)(*this); break;
+		case NodeType::PAINT_GROUND: node = LUMIX_NEW(m_allocator, PaintGroundNode)(*this); break;
+		case NodeType::INVERT: node = LUMIX_NEW(m_allocator, InvertNode)(*this); break;
+		case NodeType::GRASS: node = LUMIX_NEW(m_allocator, GrassNode)(*this); break;
+		case NodeType::NOISE: node = LUMIX_NEW(m_allocator, NoiseNode)(*this); break;
+		case NodeType::MASK_TEXTURE: node = LUMIX_NEW(m_allocator, MaskTextureNode)(*this); break;
+		case NodeType::MERGE_MASKS: node = LUMIX_NEW(m_allocator, MergeMasksNode)(*this); break;
+		case NodeType::DISTANCE_FIELD: node = LUMIX_NEW(m_allocator, DistanceFieldNode)(*this); break;
+		case NodeType::PLACE_INSTANCES: node = LUMIX_NEW(m_allocator, PlaceInstancesNode)(*this); break;
+		case NodeType::PLACE_SPLINES: node = LUMIX_NEW(m_allocator, PlaceSplinesNode)(*this); break;
+		case NodeType::ADJUST_HEIGHT: node = LUMIX_NEW(m_allocator, AdjustHeightNode)(*this); break;
+		case NodeType::FLATTEN_POLYLINES: node = LUMIX_NEW(m_allocator, FlattenPolylinesNode)(*this); break;
+		case NodeType::MASK_DISTANCE: node = LUMIX_NEW(m_allocator, MaskDistanceNode)(*this); break;
+		case NodeType::MERGE_DISTANCE_FIELDS: node = LUMIX_NEW(m_allocator, MergeDistanceFieldsNode)(*this); break;
 	}
-	node->m_editor = this;
 	node->m_pos = pos;
 	node->m_id = ++m_node_id_genereator;
 	m_nodes.push(node);
@@ -3510,15 +3653,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			tga_meta_file << "wrap_mode_v = \"clamp\"\n";
 			tga_meta_file.close();
 		}
-	}
-
-	TerrainEditor* getTerrainEditor() {
-		for (StudioApp::MousePlugin* p : m_app.getMousePlugins()) {
-			if (equalStrings(p->getName(), "terrain_editor")) {
-				return static_cast<TerrainEditor*>(p);
-			}
-		}
-		return nullptr;
 	}
 
 	void checkTasks()
