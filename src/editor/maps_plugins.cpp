@@ -940,9 +940,16 @@ struct OSMNodeEditor : NodeEditor {
 			return false;
 		}
 
+		void clearErrors() {
+			for (Node* n : m_editor.m_nodes) {
+				n->m_error = "";
+			}
+		}
+
 		void previewButton() {
 			ImGui::SameLine();
 			if (ImGui::Button(ICON_FA_SEARCH) && ensureOSMData()) {
+				clearErrors();
 
 				UniquePtr<OutputValue> out = getOutputValue(0);
 				if (out) {
@@ -1538,6 +1545,7 @@ struct GrassNode : OSMNodeEditor::Node {
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override { ASSERT(false); return {}; }
 
 	void run() {
+		clearErrors();
 		if (!ensureOSMData()) return;
 
 		UniquePtr<OutputValue> input = getInput(0);
@@ -1895,6 +1903,7 @@ struct AdjustHeightNode  : OSMNodeEditor::Node {
 	}
 
 	void run() {
+		clearErrors();
 		if (!ensureOSMData()) return;
 
 		UniquePtr<OutputValue> input =  getInput(0);
@@ -2143,6 +2152,7 @@ struct FlattenPolylinesNode : OSMNodeEditor::Node {
 	}
 
 	void run() {
+		clearErrors();
 		if (!ensureOSMData()) return;
 
 		Array<DVec3> polyline(m_editor.m_app.getAllocator());
@@ -2199,6 +2209,7 @@ struct PlaceSplinesNode : OSMNodeEditor::Node {
 	}
 
 	void run() {
+		clearErrors();
 		if (!ensureOSMData()) return;
 
 		StudioApp& app = m_editor.m_app;
@@ -2294,6 +2305,7 @@ struct PlaceInstancesNode : OSMNodeEditor::Node {
 	}
 
 	void run() {
+		clearErrors();
 		if (!ensureOSMData()) return;
 
 		UniquePtr<OutputValue> input = getInput(0);
@@ -2666,6 +2678,7 @@ struct PaintGroundNode : OSMNodeEditor::Node {
 	UniquePtr<OutputValue> getOutputValue(u16 output_idx) override { ASSERT(false); return {nullptr, nullptr}; }
 
 	void run() {
+		clearErrors();
 		if (!ensureOSMData()) return;
 
 		const UniquePtr<OutputValue> val = getInput(0);
