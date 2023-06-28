@@ -1078,6 +1078,7 @@ struct OSMNodeEditor : NodeEditor {
 	}
 
 	void open(const char* path) {
+		m_show_welcome_screen = false;
 		FileSystem& fs = m_app.getEngine().getFileSystem();
 		
 		OutputMemoryStream blob(m_app.getAllocator());
@@ -1203,6 +1204,7 @@ struct OSMNodeEditor : NodeEditor {
 
 		if (m_show_welcome_screen) {
 			if (ImGui::Button("New graph")) m_show_welcome_screen = false;
+			ImGui::SameLine();
 			if (ImGui::Button("Open")) {
 				m_show_open = true;
 				m_show_welcome_screen = false;
@@ -1988,13 +1990,16 @@ struct FlattenPolylinesNode : OSMNodeEditor::Node {
 					const float h = lerp(nodeXY[i].y, nodeXY[i + 1].y, t);
 					const Vec2 p(x, y);
 					const float center_dist = abs(dot(p - c0, n));
-					const float weight = boundary_width < 0.001f
+					float weight = boundary_width < 0.001f
 						? 1.f
 						: 1.f - clamp((center_dist - line_width * 0.5f) / boundary_width, 0.f, 1.f);
+					weight *= weight;
 
-					m_height[idx] = (m_weight_sum[idx] * m_height[idx] + h * weight) / (m_weight_sum[idx] + weight);
-					m_weight_sum[idx] += weight;
-					m_max_weight[idx] = maximum(m_max_weight[idx], weight);
+					if (weight > 0.001f) {
+						m_height[idx] = (m_weight_sum[idx] * m_height[idx] + h * weight) / (m_weight_sum[idx] + weight);
+						m_weight_sum[idx] += weight;
+						m_max_weight[idx] = maximum(m_max_weight[idx], weight);
+					}
 				}
 			}
 		}
