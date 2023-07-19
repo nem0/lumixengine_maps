@@ -843,38 +843,15 @@ struct OSMNodeEditor : NodeEditor {
 		pushUndo(NO_MERGE_UNDO);
 
 		m_delete_action.init(ICON_FA_TRASH "Delete", "Maps node delete", "maps_nodes_delete", ICON_FA_TRASH, os::Keycode::DEL, Action::Modifiers::NONE, true);
-		m_delete_action.func.bind<&OSMNodeEditor::deleteSelectedNodes>(this);
-		m_delete_action.plugin = &plugin;*this, 
-
-		m_save_action.init(ICON_FA_SAVE "Save", "Maps nodes save", "maps_nodes_save", ICON_FA_SAVE, os::Keycode::S, Action::Modifiers::CTRL, true);
-		m_save_action.func.bind<&OSMNodeEditor::save>(this);
-		m_save_action.plugin = &plugin;*this, 
-
 		m_run_action.init(ICON_FA_PLAY "Run", "Maps nodes run", "maps_nodes_run", ICON_FA_PLAY, (os::Keycode)'P', Action::Modifiers::CTRL, true);
-		m_run_action.func.bind<&OSMNodeEditor::run>(this);
-		m_run_action.plugin = &plugin;*this, 
-
-		m_undo_action.init(ICON_FA_UNDO "Undo", "Maps nodes undo", "maps_nodes_undo", ICON_FA_UNDO, os::Keycode::Z, Action::Modifiers::CTRL, true);
-		m_undo_action.func.bind<&OSMNodeEditor::undo>((SimpleUndoRedo*)this);
-		m_undo_action.plugin = &plugin;*this, 
-
-		m_redo_action.init(ICON_FA_REDO "Redo", "Maps nodes redo", "maps_nodes_redo", ICON_FA_REDO, os::Keycode::Z, Action::Modifiers::CTRL | Action::Modifiers::SHIFT, true);
-		m_redo_action.func.bind<&OSMNodeEditor::redo>((SimpleUndoRedo*)this);
-		m_redo_action.plugin = &plugin;
 
 		app.addAction(&m_delete_action);
-		app.addAction(&m_save_action);
 		app.addAction(&m_run_action);
-		app.addAction(&m_undo_action);
-		app.addAction(&m_redo_action);
 	}
 
 	~OSMNodeEditor() {
 		m_app.removeAction(&m_delete_action);
-		m_app.removeAction(&m_save_action);
 		m_app.removeAction(&m_run_action);
-		m_app.removeAction(&m_undo_action);
-		m_app.removeAction(&m_redo_action);
 		destroyPreviewTexture();
 	}
 
@@ -1171,7 +1148,7 @@ struct OSMNodeEditor : NodeEditor {
 
 		if (ImGui::BeginMenuBar()) {
 			if (ImGui::BeginMenu("File")) {
-				menuItem(m_save_action, true);
+				menuItem(m_app.getSaveAction(), true);
 				if (ImGui::MenuItem("Save As")) m_show_save_as = true;
 				if (ImGui::MenuItem("Open")) m_show_open = true;
 				if (ImGui::BeginMenu("Recent", !m_recent_paths.empty())) {
@@ -1191,8 +1168,8 @@ struct OSMNodeEditor : NodeEditor {
 				ImGui::EndMenu();
 			}
 			if (ImGui::BeginMenu("Edit")) {
-				menuItem(m_undo_action, canUndo());
-				menuItem(m_redo_action, canRedo());
+				menuItem(m_app.getUndoAction(), canUndo());
+				menuItem(m_app.getRedoAction(), canRedo());
 				ImGui::EndMenu();
 			}
 			ImGui::EndMenuBar();
@@ -1250,9 +1227,6 @@ struct OSMNodeEditor : NodeEditor {
 	Array<String> m_recent_paths;
 	Action m_run_action;
 	Action m_delete_action;
-	Action m_save_action;
-	Action m_undo_action;
-	Action m_redo_action;
 	i32 m_area_edge = 0;
 	bool m_show_save_as = false;
 	bool m_show_open = false;
@@ -3075,6 +3049,16 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		app.addWindowAction(&m_toggle_ui);
 		m_out_path[0] = '\0';
 	}
+
+	bool onAction(const Action& action) override {
+		if (&action == &m_osm_editor.m_delete_action) m_osm_editor.deleteSelectedNodes();
+		else if (&action == &m_osm_editor.m_run_action) m_osm_editor.run();
+		else if (&action == &m_app.getSaveAction()) m_osm_editor.save();
+		else if (&action == &m_app.getUndoAction()) m_osm_editor.undo();
+		else if (&action == &m_app.getRedoAction()) m_osm_editor.redo();
+		else return false;
+		return true;
+	}
 	
 	void onBeforeSettingsSaved() override {
 		Settings& settings = m_app.getSettings();
@@ -3763,9 +3747,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 	}
 
-	bool hasFocus() override { return m_has_focus; }
+	bool hasFocus() const override { return m_has_focus; }
 	
-	void onWindowGUI() override {
+	void onGUI() override {
 		m_has_focus = false;
 		while (!m_queue.empty() && m_in_progress.size() < 8) {
 			MapsTask* task = m_queue.back();
