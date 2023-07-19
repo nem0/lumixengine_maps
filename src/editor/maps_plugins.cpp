@@ -842,15 +842,12 @@ struct OSMNodeEditor : NodeEditor {
 	{
 		pushUndo(NO_MERGE_UNDO);
 
-		m_delete_action.init(ICON_FA_TRASH "Delete", "Maps node delete", "maps_nodes_delete", ICON_FA_TRASH, os::Keycode::DEL, Action::Modifiers::NONE, true);
 		m_run_action.init(ICON_FA_PLAY "Run", "Maps nodes run", "maps_nodes_run", ICON_FA_PLAY, (os::Keycode)'P', Action::Modifiers::CTRL, true);
 
-		app.addAction(&m_delete_action);
 		app.addAction(&m_run_action);
 	}
 
 	~OSMNodeEditor() {
-		m_app.removeAction(&m_delete_action);
 		m_app.removeAction(&m_run_action);
 		destroyPreviewTexture();
 	}
@@ -1226,7 +1223,6 @@ struct OSMNodeEditor : NodeEditor {
 	u32 m_node_id_genereator = 1;
 	Array<String> m_recent_paths;
 	Action m_run_action;
-	Action m_delete_action;
 	i32 m_area_edge = 0;
 	bool m_show_save_as = false;
 	bool m_show_open = false;
@@ -3051,7 +3047,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	}
 
 	bool onAction(const Action& action) override {
-		if (&action == &m_osm_editor.m_delete_action) m_osm_editor.deleteSelectedNodes();
+		if (&m_app.getDeleteAction() == &action) m_osm_editor.deleteSelectedNodes();
 		else if (&action == &m_osm_editor.m_run_action) m_osm_editor.run();
 		else if (&action == &m_app.getSaveAction()) m_osm_editor.save();
 		else if (&action == &m_app.getUndoAction()) m_osm_editor.undo();
