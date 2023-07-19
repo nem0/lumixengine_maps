@@ -59,12 +59,14 @@ bool download(const char* url, OutputMemoryStream& blob, u32& downloaded_bytes) 
 	char buffer[4096];
 	ULONG read = 0;
 	HRESULT hr;
+	downloaded_bytes = 0;
 	do {
 		DWORD bytesRead = 0;
 		hr = stream->Read(buffer, sizeof(buffer), &bytesRead);
 
 		if (bytesRead > 0)
 		{
+			downloaded_bytes += bytesRead; 
 			blob.write(buffer, bytesRead);
 		}
 	} while (SUCCEEDED(hr) && hr != S_FALSE);
