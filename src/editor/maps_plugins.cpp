@@ -1147,7 +1147,7 @@ struct OSMNodeEditor : NodeEditor {
 
 		if (ImGui::BeginMenuBar()) {
 			if (ImGui::BeginMenu("File")) {
-				menuItem(m_app.getSaveAction(), true);
+				if (menuItem(m_app.getSaveAction(), true)) save();
 				if (ImGui::MenuItem("Save As")) m_show_save_as = true;
 				if (ImGui::MenuItem("Open")) m_show_open = true;
 				if (ImGui::BeginMenu("Recent", !m_recent_paths.empty())) {
@@ -1156,7 +1156,7 @@ struct OSMNodeEditor : NodeEditor {
 					}
 					ImGui::EndMenu();
 				}
-				menuItem(m_run_action, true);
+				if (menuItem(m_run_action, true)) run();
 				ImGui::EndMenu();
 			}
 			if (ImGui::BeginMenu("OSM data")) {
@@ -1167,8 +1167,8 @@ struct OSMNodeEditor : NodeEditor {
 				ImGui::EndMenu();
 			}
 			if (ImGui::BeginMenu("Edit")) {
-				menuItem(m_app.getUndoAction(), canUndo());
-				menuItem(m_app.getRedoAction(), canRedo());
+				if (menuItem(m_app.getUndoAction(), canUndo())) undo();
+				if (menuItem(m_app.getRedoAction(), canRedo())) redo();
 				ImGui::EndMenu();
 			}
 			ImGui::EndMenuBar();
