@@ -1146,8 +1146,9 @@ struct OSMNodeEditor : NodeEditor {
 		};
 
 		if (ImGui::BeginMenuBar()) {
+			const CommonActions& actions = m_app.getCommonActions();
 			if (ImGui::BeginMenu("File")) {
-				if (menuItem(m_app.getSaveAction(), true)) save();
+				if (menuItem(actions.save, true)) save();
 				if (ImGui::MenuItem("Save As")) m_show_save_as = true;
 				if (ImGui::MenuItem("Open")) m_show_open = true;
 				if (ImGui::BeginMenu("Recent", !m_recent_paths.empty())) {
@@ -1167,8 +1168,8 @@ struct OSMNodeEditor : NodeEditor {
 				ImGui::EndMenu();
 			}
 			if (ImGui::BeginMenu("Edit")) {
-				if (menuItem(m_app.getUndoAction(), canUndo())) undo();
-				if (menuItem(m_app.getRedoAction(), canRedo())) redo();
+				if (menuItem(actions.undo, canUndo())) undo();
+				if (menuItem(actions.redo, canRedo())) redo();
 				ImGui::EndMenu();
 			}
 			ImGui::EndMenuBar();
@@ -3049,11 +3050,12 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	}
 
 	bool onAction(const Action& action) override {
-		if (&m_app.getDeleteAction() == &action) m_osm_editor.deleteSelectedNodes();
+		const CommonActions& actions = m_app.getCommonActions();
+		if (&actions.del == &action) m_osm_editor.deleteSelectedNodes();
 		else if (&action == &m_osm_editor.m_run_action) m_osm_editor.run();
-		else if (&action == &m_app.getSaveAction()) m_osm_editor.save();
-		else if (&action == &m_app.getUndoAction()) m_osm_editor.undo();
-		else if (&action == &m_app.getRedoAction()) m_osm_editor.redo();
+		else if (&action == &actions.save) m_osm_editor.save();
+		else if (&action == &actions.undo) m_osm_editor.undo();
+		else if (&action == &actions.redo) m_osm_editor.redo();
 		else return false;
 		return true;
 	}
