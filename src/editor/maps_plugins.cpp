@@ -17,6 +17,7 @@
 #include "engine/os.h"
 #include "engine/path.h"
 #include "engine/prefab.h"
+#include "engine/profiler.h"
 #include "engine/reflection.h"
 #include "engine/resource_manager.h"
 #include "engine/stack_array.h"
@@ -391,7 +392,7 @@ struct OSMParser {
 		pugi::xml_attribute attr = n.attribute(key);
 		if (attr.empty()) return false;
 		const char* str = attr.value();
-		fromCString(Span(str, stringLength(str)), out);
+		fromCString(str, out);
 		return true;
 	}
 
@@ -445,7 +446,7 @@ struct OSMParser {
 		if (ref_attr.empty()) return false;
 		const char* ref_str = ref_attr.value();
 		u64 node_id;
-		fromCString(Span(ref_str, (u32)strlen(ref_str)), node_id);
+		fromCString(ref_str, node_id);
 
 		auto iter = m_nodes.find(node_id);
 		if (!iter.isValid()) return false;
@@ -550,7 +551,7 @@ struct OSMParser {
 		if (ref_attr.empty()) return pugi::xml_node();
 		const char* ref_str = ref_attr.value();
 		u64 node_id;
-		fromCString(Span(ref_str, (u32)strlen(ref_str)), node_id);
+		fromCString(ref_str, node_id);
 
 		auto iter = m_nodes.find(node_id);
 		if (!iter.isValid()) return pugi::xml_node();
@@ -654,7 +655,7 @@ struct OSMParser {
 
 				const char* id_str = id_attr.value();
 				u64 id;
-				fromCString(Span(id_str, stringLength(id_str)), id);
+				fromCString(id_str, id);
 				m_nodes.insert(id, n);
 			}
 			else if (equalStrings(n.name(), "way")) {
@@ -663,7 +664,7 @@ struct OSMParser {
 
 				const char* id_str = id_attr.value();
 				u64 id;
-				fromCString(Span(id_str, stringLength(id_str)), id);
+				fromCString(id_str, id);
 				m_ways.insert(id, n);
 			}
 			else if (equalStrings(n.name(), "relation")) {
@@ -672,7 +673,7 @@ struct OSMParser {
 
 				const char* id_str = id_attr.value();
 				u64 id;
-				fromCString(Span(id_str, stringLength(id_str)), id);
+				fromCString(id_str, id);
 				m_relations.insert(id, n);
 			}
 		}
@@ -3971,8 +3972,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 } // anonoymous namespace
 
 
-LUMIX_STUDIO_ENTRY(maps)
-{
+LUMIX_STUDIO_ENTRY(maps) {
+	PROFILE_FUNCTION();
 	WorldEditor& editor = app.getWorldEditor();
 
 	auto* plugin = LUMIX_NEW(editor.getAllocator(), MapsPlugin)(app);
