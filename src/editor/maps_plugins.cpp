@@ -2308,13 +2308,12 @@ struct PlaceInstancesNode : OSMNodeEditor::Node {
 		if (ImGui::BeginPopup("Edit models")) {
 			for (ModelProbability& mp : m_models) {
 				if (ImGui::TreeNode(&mp, "%d", u32(&mp - m_models.begin()))) {
-					char path[LUMIX_MAX_PATH];
-					copyString(path, mp.resource ? mp.resource->getPath().c_str() : "");
-					if (m_editor.m_app.getAssetBrowser().resourceInput("model", Span(path), Model::TYPE, 150)) {
+					Path path = mp.resource ? mp.resource->getPath() : Path("");
+					if (m_editor.m_app.getAssetBrowser().resourceInput("model", path, Model::TYPE, 150)) {
 						res = true;
 						if (mp.resource) mp.resource->decRefCount();
 						ResourceManagerHub& rm = m_editor.m_app.getEngine().getResourceManager();
-						mp.resource = rm.load<Model>(Path(path));
+						mp.resource = rm.load<Model>(path);
 					}
 					res = ImGui::DragFloat4("Distances", &mp.distances.x) || res;
 					res = ImGui::DragFloat2("Scale", &mp.scale.x) || res;
@@ -3300,7 +3299,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		const EntityRef e = editor.addEntityAt({-width * 0.5, m_last_saved_hm_range.x, -width * 0.5});
 		editor.addComponent(Span(&e, 1), TERRAIN_TYPE);
 		const PathInfo file_info(m_out_path);
-		Path mat_path(file_info.m_dir, "/", file_info.m_basename, ".mat");
+		Path mat_path(file_info.dir, "/", file_info.basename, ".mat");
 		
 		editor.setProperty(TERRAIN_TYPE, "", -1, "Material", Span(&e, 1), mat_path);
 
@@ -3452,14 +3451,14 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		RenderInterface* ri = m_app.getRenderInterface();
 		PathInfo file_info(m_out_path);
-		StaticString<LUMIX_MAX_PATH> satellite_path(file_info.m_dir, "/", file_info.m_basename, ".tga");
+		StaticString<LUMIX_MAX_PATH> satellite_path(file_info.dir, "/", file_info.basename, ".tga");
 		ri->saveTexture(editor.getEngine(), satellite_path, imagery.begin(), map_size, map_size, true);
 
-		const StaticString<LUMIX_MAX_PATH> albedo_path(file_info.m_dir, "albedo_detail.ltc");
-		const StaticString<LUMIX_MAX_PATH> normal_path(file_info.m_dir, "normal_detail.ltc");
-		const StaticString<LUMIX_MAX_PATH> splatmap_path(file_info.m_dir, "splatmap.tga");
-		const StaticString<LUMIX_MAX_PATH> satellite_meta_path(file_info.m_dir, file_info.m_basename, ".tga.meta");
-		const StaticString<LUMIX_MAX_PATH> splatmap_meta_path(file_info.m_dir, "splatmap.tga.meta");
+		const StaticString<LUMIX_MAX_PATH> albedo_path(file_info.dir, "albedo_detail.ltc");
+		const StaticString<LUMIX_MAX_PATH> normal_path(file_info.dir, "normal_detail.ltc");
+		const StaticString<LUMIX_MAX_PATH> splatmap_path(file_info.dir, "splatmap.tga");
+		const StaticString<LUMIX_MAX_PATH> satellite_meta_path(file_info.dir, file_info.basename, ".tga.meta");
+		const StaticString<LUMIX_MAX_PATH> splatmap_meta_path(file_info.dir, "splatmap.tga.meta");
 		
 		if (!fs.open(satellite_meta_path, file)) {
 			logError("Failed to create ", satellite_meta_path);
@@ -3524,19 +3523,19 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			}
 		}
 
-		StaticString<LUMIX_MAX_PATH> mat_path(file_info.m_dir, "/", file_info.m_basename, ".mat");
+		StaticString<LUMIX_MAX_PATH> mat_path(file_info.dir, "/", file_info.basename, ".mat");
 		os::OutputFile mat_file;
 		if (!fs.fileExists(mat_path)) {
 			if (fs.open(mat_path, mat_file)) {
 				mat_file << R"#(
 					shader "/pipelines/terrain.shd"
 					texture ")#";
-				mat_file << file_info.m_basename;
+				mat_file << file_info.basename;
 				mat_file << R"#(.raw"
 					texture "albedo_detail.ltc"
 					texture "normal_detail.ltc"
 					texture "splatmap.tga"
-					texture ")#" << file_info.m_basename << R"#(.tga"
+					texture ")#" << file_info.basename << R"#(.tga"
 					uniform("Detail distance", 50.000000)
 					uniform("Detail scale", 1.000000)
 					uniform("Noise UV scale", 0.200000)
@@ -3548,7 +3547,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			}
 		}
 
-		StaticString<LUMIX_MAX_PATH> raw_meta_path(file_info.m_dir, "/", file_info.m_basename, ".raw.meta");
+		StaticString<LUMIX_MAX_PATH> raw_meta_path(file_info.dir, "/", file_info.basename, ".raw.meta");
 		os::OutputFile raw_meta_file;
 		if (fs.open(raw_meta_path, raw_meta_file)) {
 			raw_meta_file << "wrap_mode_u = \"clamp\"\n";
@@ -3556,7 +3555,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			raw_meta_file.close();
 		}
 
-		StaticString<LUMIX_MAX_PATH> tga_meta_path(file_info.m_dir, "/", file_info.m_basename, ".tga.meta");
+		StaticString<LUMIX_MAX_PATH> tga_meta_path(file_info.dir, "/", file_info.basename, ".tga.meta");
 		os::OutputFile tga_meta_file;
 		if (fs.open(tga_meta_path, tga_meta_file)) {
 			tga_meta_file << "srgb = true\n";
