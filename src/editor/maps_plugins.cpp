@@ -778,7 +778,7 @@ struct OSMNodeEditor : NodeEditor {
 
 		template <int N>
 		bool textureMaskInput(StaticString<N>& texture) {
-			char basename[LUMIX_MAX_PATH];
+			char basename[MAX_PATH];
 			copyString(Span(basename), Path::getBasename(texture));
 			bool res = false;
 			if (ImGui::Button(basename[0] ? basename : "Click to select", ImVec2(150, 0))) m_show_mask_open = true;
@@ -898,7 +898,7 @@ struct OSMNodeEditor : NodeEditor {
 
 	void onSettingsLoaded(Settings& settings) {
 		m_recent_paths.clear();
-		char tmp[LUMIX_MAX_PATH];
+		char tmp[MAX_PATH];
 		FileSystem& fs = m_app.getEngine().getFileSystem();
 		for (u32 i = 0; ; ++i) {
 			const StaticString<32> key("maps_plugin_recent_", i);
@@ -1044,7 +1044,7 @@ struct OSMNodeEditor : NodeEditor {
 			if (t.key) {
 				label.append(" (LMB + ", t.key, ")");
 			}
-			if ((!filter[0] || stristr(t.label, filter) != nullptr) && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::MenuItem(label))){
+			if ((!filter[0] || findInsensitive(t.label, filter) != nullptr) && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::MenuItem(label))){
 				new_node = addNode(t.type, pos);
 				pushUndo(NO_MERGE_UNDO);
 				filter[0] = '\0';
@@ -1850,7 +1850,7 @@ struct AdjustHeightNode  : OSMNodeEditor::Node {
 		stbi_image_free(rgba);
 	}
 
-	StaticString<LUMIX_MAX_PATH> m_texture;
+	StaticString<MAX_PATH> m_texture;
 	float m_texture_scale = 1.f;
 	float m_multiplier = 1.f;
 	Vec2 m_distance_range = Vec2(0, 1);
@@ -2515,7 +2515,7 @@ struct MaskTextureNode : OSMNodeEditor::Node {
 		return output.move();
 	}
 
-	StaticString<LUMIX_MAX_PATH> m_texture;
+	StaticString<MAX_PATH> m_texture;
 	float m_ref = 0.f;
 	float m_mask_scale = 1.f;
 };
@@ -2970,7 +2970,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		bool loadFromCache() {
 			FileSystem& fs = app->getWorldEditor().getEngine().getFileSystem();
-			const StaticString<LUMIX_MAX_PATH> path(".lumix/maps_cache", "/", is_heightmap ? "hm" : "im", tile.loc.z, "_", tile.loc.x, "_", tile.loc.y);
+			const StaticString<MAX_PATH> path(".lumix/maps_cache", "/", is_heightmap ? "hm" : "im", tile.loc.z, "_", tile.loc.x, "_", tile.loc.y);
 			
 			os::InputFile file;
 			if (fs.open(path, file)) {
@@ -2985,10 +2985,10 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		void saveToCache() {
 			FileSystem& fs = app->getWorldEditor().getEngine().getFileSystem();
-			const StaticString<LUMIX_MAX_PATH> dir(fs.getBasePath(), ".lumix/maps_cache");
+			const StaticString<MAX_PATH> dir(fs.getBasePath(), ".lumix/maps_cache");
 			if (!os::makePath(dir)) logError("Could not create", dir);
 
-			const StaticString<LUMIX_MAX_PATH> path(dir, "/", is_heightmap ? "hm" : "im", tile.loc.z, "_", tile.loc.x, "_", tile.loc.y);
+			const StaticString<MAX_PATH> path(dir, "/", is_heightmap ? "hm" : "im", tile.loc.z, "_", tile.loc.x, "_", tile.loc.y);
 			os::OutputFile file;
 			if (file.open(path)) {
 				u8* out = is_heightmap ? (u8*)tile.hm_data.begin() : (u8*)tile.imagery_data.begin();
@@ -3007,8 +3007,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			if (loadFromCache()) return 0;
 			
 			String url("https://", allocator);
-			url.cat((const char*)host);
-			url.cat((const char*)path);
+			url.append(host, path);
 			OutputMemoryStream data(allocator);
 			u32 local_downloaded_bytes;
 			if (!::download(url.c_str(), data, local_downloaded_bytes)) {
@@ -3022,7 +3021,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			return res ? 0 : -1;
 		}
 
-		StaticString<LUMIX_MAX_PATH> host;
+		StaticString<MAX_PATH> host;
 		StaticString<1024> path;
 		IAllocator& allocator;
 		volatile i32* downloaded_bytes;
@@ -3451,14 +3450,14 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 
 		RenderInterface* ri = m_app.getRenderInterface();
 		PathInfo file_info(m_out_path);
-		StaticString<LUMIX_MAX_PATH> satellite_path(file_info.dir, "/", file_info.basename, ".tga");
+		StaticString<MAX_PATH> satellite_path(file_info.dir, "/", file_info.basename, ".tga");
 		ri->saveTexture(editor.getEngine(), satellite_path, imagery.begin(), map_size, map_size, true);
 
-		const StaticString<LUMIX_MAX_PATH> albedo_path(file_info.dir, "albedo_detail.ltc");
-		const StaticString<LUMIX_MAX_PATH> normal_path(file_info.dir, "normal_detail.ltc");
-		const StaticString<LUMIX_MAX_PATH> splatmap_path(file_info.dir, "splatmap.tga");
-		const StaticString<LUMIX_MAX_PATH> satellite_meta_path(file_info.dir, file_info.basename, ".tga.meta");
-		const StaticString<LUMIX_MAX_PATH> splatmap_meta_path(file_info.dir, "splatmap.tga.meta");
+		const StaticString<MAX_PATH> albedo_path(file_info.dir, "albedo_detail.ltc");
+		const StaticString<MAX_PATH> normal_path(file_info.dir, "normal_detail.ltc");
+		const StaticString<MAX_PATH> splatmap_path(file_info.dir, "splatmap.tga");
+		const StaticString<MAX_PATH> satellite_meta_path(file_info.dir, file_info.basename, ".tga.meta");
+		const StaticString<MAX_PATH> splatmap_meta_path(file_info.dir, "splatmap.tga.meta");
 		
 		if (!fs.open(satellite_meta_path, file)) {
 			logError("Failed to create ", satellite_meta_path);
@@ -3523,7 +3522,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			}
 		}
 
-		StaticString<LUMIX_MAX_PATH> mat_path(file_info.dir, "/", file_info.basename, ".mat");
+		StaticString<MAX_PATH> mat_path(file_info.dir, "/", file_info.basename, ".mat");
 		os::OutputFile mat_file;
 		if (!fs.fileExists(mat_path)) {
 			if (fs.open(mat_path, mat_file)) {
@@ -3547,7 +3546,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			}
 		}
 
-		StaticString<LUMIX_MAX_PATH> raw_meta_path(file_info.dir, "/", file_info.basename, ".raw.meta");
+		StaticString<MAX_PATH> raw_meta_path(file_info.dir, "/", file_info.basename, ".raw.meta");
 		os::OutputFile raw_meta_file;
 		if (fs.open(raw_meta_path, raw_meta_file)) {
 			raw_meta_file << "wrap_mode_u = \"clamp\"\n";
@@ -3555,7 +3554,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			raw_meta_file.close();
 		}
 
-		StaticString<LUMIX_MAX_PATH> tga_meta_path(file_info.dir, "/", file_info.basename, ".tga.meta");
+		StaticString<MAX_PATH> tga_meta_path(file_info.dir, "/", file_info.basename, ".tga.meta");
 		os::OutputFile tga_meta_file;
 		if (fs.open(tga_meta_path, tga_meta_file)) {
 			tga_meta_file << "srgb = true\n";
@@ -3825,7 +3824,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		ImGuiEx::Label("Resample");
 		ImGui::InputInt("##hmresample", &m_resample_hm);
 		ImGuiEx::Label("Output");
-		if (ImGui::Button(StaticString<LUMIX_MAX_PATH + 128>(m_out_path[0] ? m_out_path : "Click to set"), ImVec2(-1, 0))) {
+		if (ImGui::Button(StaticString<MAX_PATH + 128>(m_out_path[0] ? m_out_path : "Click to set"), ImVec2(-1, 0))) {
 			m_show_save_raw = true;
 		}
 
@@ -3957,7 +3956,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	i32 m_y = 0;
 	IVec2 m_pixel_offset{0, 0};
 	i32 m_size = 1;
-	char m_out_path[LUMIX_MAX_PATH];
+	char m_out_path[MAX_PATH];
 	IVec2 m_drag_start_offset;
 	bool m_is_dragging = false;
 	bool m_has_focus = false;
