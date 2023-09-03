@@ -1037,7 +1037,7 @@ struct OSMNodeEditor : NodeEditor {
 
 	void onContextMenu(ImVec2 pos) override {
 		static char filter[64] = "";
-		ImGuiEx::filter("Filter", filter, sizeof(filter), 150, ImGui::IsWindowAppearing());
+		ImGuiEx::Filter("Filter", filter, sizeof(filter), 150, ImGui::IsWindowAppearing());
 		Node* new_node = nullptr;
 		for (const auto& t : TYPES) {
 			StaticString<64> label(t.label);
