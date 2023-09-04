@@ -845,7 +845,7 @@ struct OSMNodeEditor : NodeEditor {
 	{
 		pushUndo(NO_MERGE_UNDO);
 
-		m_run_action.init(ICON_FA_PLAY "Run", "Maps nodes run", "maps_nodes_run", ICON_FA_PLAY, (os::Keycode)'P', Action::Modifiers::CTRL, true);
+		m_run_action.init(ICON_FA_PLAY "Run", "Maps nodes run", "maps_nodes_run", ICON_FA_PLAY, (os::Keycode)'P', Action::Modifiers::CTRL, Action::IMGUI_PRIORITY);
 
 		app.addAction(&m_run_action);
 	}
@@ -3041,7 +3041,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		, m_bitmap(app.getAllocator())
 		, m_osm_editor(*this, app)
 	{
-		m_toggle_ui.init("Maps", "maps", "maps", "", true);
+		m_toggle_ui.init("Maps", "maps", "maps", "", Action::IMGUI_PRIORITY);
 		m_toggle_ui.func.bind<&MapsPlugin::toggleOpen>(this);
 		m_toggle_ui.is_selected.bind<&MapsPlugin::isOpen>(this);
 		app.addWindowAction(&m_toggle_ui);
