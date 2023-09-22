@@ -3015,7 +3015,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				return -1;
 			}
 
-			atomicAdd(downloaded_bytes, local_downloaded_bytes);
+			downloaded_bytes->add(local_downloaded_bytes);
 			const bool res = parseImage(data);
 			if (res) saveToCache();
 			return res ? 0 : -1;
@@ -3024,7 +3024,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		StaticString<MAX_PATH> host;
 		StaticString<1024> path;
 		IAllocator& allocator;
-		volatile i32* downloaded_bytes;
+		AtomicI32* downloaded_bytes;
 		volatile bool canceled = false;
 		StudioApp* app;
 		TileData& tile;
@@ -3946,7 +3946,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	Array<TileData*> m_cache;
 	Array<MapsTask*> m_queue;
 	Array<MapsTask*> m_in_progress;
-	volatile i32 m_downloaded_bytes = 0;
+	AtomicI32 m_downloaded_bytes = 0;
 	bool m_open = false;
 	bool m_is_download_deferred = true;
 	i32 m_zoom = 1;
