@@ -31,6 +31,9 @@
 #include "renderer/render_module.h"
 #include "renderer/terrain.h"
 #include "renderer/texture.h"
+#ifndef STATIC_PLUGINS
+	#define STB_IMAGE_IMPLEMENTATION
+#endif
 #include "stb/stb_image.h"
 #include "pugixml/pugixml.hpp"
 

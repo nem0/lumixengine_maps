@@ -7,7 +7,10 @@ project "maps"
 		"genie.lua"
 	}
 	defines { "BUILDING_MAPS" }
-	links { "engine" }
+	links { "engine", "core", "renderer" }
+	if build_studio then
+		links { "editor" }
+	end
 	useLua()
 	defaultConfigurations()
 
