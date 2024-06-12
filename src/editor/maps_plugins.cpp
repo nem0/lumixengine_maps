@@ -1,4 +1,5 @@
 #define LUMIX_NO_CUSTOM_CRT
+#include <string.h>
 #include "core/atomic.h"
 #include "core/geometry.h"
 #include "core/hash_map.h"
@@ -469,7 +470,7 @@ struct OSMParser {
 	}
 	
 	template <typename F>
-	void forEachWayInRelation(pugi::xml_node relation, F& f) const {
+	void forEachWayInRelation(pugi::xml_node relation, F&& f) const {
 		for (pugi::xml_node n = relation.first_child(); !n.empty(); n = n.next_sibling()) {
 			if (!equalStrings(n.name(), "member")) continue;
 			if (!hasAttributeValue(n, "type", "way")) continue;
