@@ -11,7 +11,6 @@ project "maps"
 	if build_studio then
 		links { "editor" }
 	end
-	useLua()
 	defaultConfigurations()
 
 linkPlugin("maps")

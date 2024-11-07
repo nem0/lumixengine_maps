@@ -848,14 +848,9 @@ struct OSMNodeEditor : NodeEditor {
 		, m_osm_parser(app)
 	{
 		pushUndo(NO_MERGE_UNDO);
-
-		m_run_action.init(ICON_FA_PLAY "Run", "Maps nodes run", "maps_nodes_run", ICON_FA_PLAY, (os::Keycode)'P', Action::Modifiers::CTRL, Action::IMGUI_PRIORITY);
-
-		app.addAction(&m_run_action);
 	}
 
 	~OSMNodeEditor() {
-		m_app.removeAction(&m_run_action);
 		destroyPreviewTexture();
 	}
 
@@ -890,28 +885,6 @@ struct OSMNodeEditor : NodeEditor {
 			}
 		}
 		return nullptr;
-	}
-
-	void onBeforeSettingsSaved(Settings& settings) {
-		for (const String& p : m_recent_paths) {
-			const u32 i = u32(&p - m_recent_paths.begin());
-			const StaticString<32> key("maps_plugin_recent_", i);
-			settings.setValue(Settings::LOCAL, key, p.c_str());
-		}
-	}
-
-	void onSettingsLoaded(Settings& settings) {
-		m_recent_paths.clear();
-		char tmp[MAX_PATH];
-		FileSystem& fs = m_app.getEngine().getFileSystem();
-		for (u32 i = 0; ; ++i) {
-			const StaticString<32> key("maps_plugin_recent_", i);
-			const u32 len = settings.getValue(Settings::LOCAL, key, Span(tmp));
-			if (len == 0) break;
-			if (fs.fileExists(tmp)) {
-				m_recent_paths.emplace(tmp, m_app.getAllocator());
-			}
-		}
 	}
 
 	void deleteSelectedNodes() {
@@ -1230,7 +1203,7 @@ struct OSMNodeEditor : NodeEditor {
 	Array<Node*> m_nodes;
 	u32 m_node_id_genereator = 1;
 	Array<String> m_recent_paths;
-	Action m_run_action;
+	Action m_run_action{"Run", "OSM editor - run", "maps_nodes_run", ICON_FA_PLAY};
 	i32 m_area_edge = 0;
 	bool m_show_save_as = false;
 	bool m_show_open = false;
@@ -3045,57 +3018,22 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		, m_bitmap(app.getAllocator())
 		, m_osm_editor(*this, app)
 	{
-		m_toggle_ui.init("Maps", "maps", "maps", "", Action::IMGUI_PRIORITY);
-		m_toggle_ui.func.bind<&MapsPlugin::toggleOpen>(this);
-		m_toggle_ui.is_selected.bind<&MapsPlugin::isOpen>(this);
-		app.addWindowAction(&m_toggle_ui);
 		m_out_path[0] = '\0';
-	}
-
-	bool onAction(const Action& action) override {
-		const CommonActions& actions = m_app.getCommonActions();
-		if (&actions.del == &action) m_osm_editor.deleteSelectedNodes();
-		else if (&action == &m_osm_editor.m_run_action) m_osm_editor.run();
-		else if (&action == &actions.save) m_osm_editor.save();
-		else if (&action == &actions.undo) m_osm_editor.undo();
-		else if (&action == &actions.redo) m_osm_editor.redo();
-		else return false;
-		return true;
-	}
-	
-	void onBeforeSettingsSaved() override {
 		Settings& settings = m_app.getSettings();
-		settings.setValue(Settings::GLOBAL, "is_maps_plugin_open", m_open);
-		settings.setValue(Settings::LOCAL, "maps_x", m_x);
-		settings.setValue(Settings::LOCAL, "maps_y", m_y);
-		settings.setValue(Settings::LOCAL, "maps_scale", m_scale);
-		settings.setValue(Settings::LOCAL, "maps_resample", m_resample_hm);
-		settings.setValue(Settings::LOCAL, "maps_zoom", m_zoom);
-		settings.setValue(Settings::LOCAL, "maps_offset_x", m_pixel_offset.x);
-		settings.setValue(Settings::LOCAL, "maps_offset_y", m_pixel_offset.y);
-		settings.setValue(Settings::LOCAL, "maps_size", m_size);
-		settings.setValue(Settings::LOCAL, "maps_osm_area_edge", m_osm_editor.m_area_edge);
-		m_osm_editor.onBeforeSettingsSaved(settings);
-	}
-
-	void onSettingsLoaded() override {
-		Settings& settings = m_app.getSettings();
-		m_open = settings.getValue(Settings::GLOBAL, "is_maps_plugin_open", false);
-		m_x = settings.getValue(Settings::LOCAL, "maps_x", 0);
-		m_y = settings.getValue(Settings::LOCAL, "maps_y", 0);
-		m_scale = settings.getValue(Settings::LOCAL, "maps_scale", 1.f);
-		m_osm_editor.m_area_edge = settings.getValue(Settings::LOCAL, "maps_osm_area_edge", 0);
-		m_resample_hm = settings.getValue(Settings::LOCAL, "maps_resample", 1);
-		m_zoom = settings.getValue(Settings::LOCAL, "maps_zoom", 1);
-		m_pixel_offset.x = settings.getValue(Settings::LOCAL, "maps_offset_x", 0);
-		m_pixel_offset.y = settings.getValue(Settings::LOCAL, "maps_offset_y", 0);
-		m_size = settings.getValue(Settings::LOCAL, "maps_size", 1);
-		m_osm_editor.onSettingsLoaded(settings);
+		settings.registerOption("maps_open", &m_open);
+		settings.registerOption("maps_x", &m_x);
+		settings.registerOption("maps_y", &m_y);
+		settings.registerOption("maps_scale", &m_scale);
+		settings.registerOption("maps_resample", &m_resample_hm);
+		settings.registerOption("maps_zoom", &m_zoom);
+		settings.registerOption("maps_offset_x", &m_pixel_offset.x);
+		settings.registerOption("maps_offset_y", &m_pixel_offset.y);
+		settings.registerOption("maps_size", &m_size);
+		settings.registerOption("maps_osm_area_edge", &m_osm_editor.m_area_edge);
 	}
 
 	~MapsPlugin()
 	{
-		m_app.removeAction(&m_toggle_ui);
 		finishAllTasks();
 		clear();
 	}
@@ -3750,10 +3688,9 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		}
 	}
 
-	bool hasFocus() const override { return m_has_focus; }
-	
 	void onGUI() override {
-		m_has_focus = false;
+		if (m_app.checkShortcut(m_toggle_ui, true)) m_open = !m_open;
+
 		while (!m_queue.empty() && m_in_progress.size() < 8) {
 			MapsTask* task = m_queue.back();
 			m_queue.pop();
@@ -3768,7 +3705,13 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			ImGui::End();
 			return;
 		}
-		m_has_focus = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+
+		CommonActions& actions = m_app.getCommonActions();
+		if (m_app.checkShortcut(actions.del, false)) m_osm_editor.deleteSelectedNodes();
+		else if (m_app.checkShortcut(m_osm_editor.m_run_action, false)) m_osm_editor.run();
+		else if (m_app.checkShortcut(actions.save, false)) m_osm_editor.save();
+		else if (m_app.checkShortcut(actions.undo, false)) m_osm_editor.undo();
+		else if (m_app.checkShortcut(actions.redo, false)) m_osm_editor.redo();
 
 		if (ImGui::BeginTabBar("tabs")) {
 			if (ImGui::BeginTabItem("Map")) {
@@ -3848,6 +3791,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 			const ImVec2 cp = ImGui::GetCursorPos();
 
 			for (TileData* tile : m_tiles) {
+				ImGui::PushID(tile);
 				ImVec2 p = getPos(*tile);
 				float scale = 2.f / (1 << m_size);
 				p = p * ImVec2(scale, scale);
@@ -3855,6 +3799,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				if (tile->hm != (void*)(intptr_t)0xffFFffFF && m_show_hm) ImGui::ImageButton("hm", tile->hm, ImVec2(TILE_SIZE * scale, TILE_SIZE* scale));
 				if (tile->imagery != (void*)(intptr_t)0xffFFffFF && !m_show_hm) ImGui::ImageButton("img", tile->imagery, ImVec2(TILE_SIZE* scale, TILE_SIZE* scale));
 				hovered = hovered || ImGui::IsItemHovered();
+				ImGui::PopID();
 			}
 			ImGui::SetCursorPos(cp);
 			ImGui::Dummy(ImVec2(512, 512));
@@ -3963,9 +3908,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	char m_out_path[MAX_PATH];
 	IVec2 m_drag_start_offset;
 	bool m_is_dragging = false;
-	bool m_has_focus = false;
 	bool m_show_save_raw = false;
-	Action m_toggle_ui;
+	Action m_toggle_ui{"Maps", "Maps - toggle ui", "maps_toggle_ui", nullptr, Action::WINDOW};
 	Vec2 m_last_saved_hm_range = Vec2(0, 1000);
 	OSMNodeEditor m_osm_editor;
 };
