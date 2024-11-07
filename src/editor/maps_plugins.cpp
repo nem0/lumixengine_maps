@@ -3058,8 +3058,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		m_in_progress.clear();
 	}
 
-	void toggleOpen() { m_open = !m_open; }
-	bool isOpen() const { return m_open; }
 	const char* getName() const override { return "maps"; }
 
 	DVec2 getCenter() {
