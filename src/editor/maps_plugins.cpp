@@ -3396,16 +3396,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		const StaticString<MAX_PATH> albedo_path(file_info.dir, "albedo_detail.ltc");
 		const StaticString<MAX_PATH> normal_path(file_info.dir, "normal_detail.ltc");
 		const StaticString<MAX_PATH> splatmap_path(file_info.dir, "splatmap.tga");
-		const StaticString<MAX_PATH> satellite_meta_path(file_info.dir, file_info.basename, ".tga.meta");
 		const StaticString<MAX_PATH> splatmap_meta_path(file_info.dir, "splatmap.tga.meta");
-		
-		if (!fs.open(satellite_meta_path, file)) {
-			logError("Failed to create ", satellite_meta_path);
-		}
-		else {
-			file << "filter = \"point\"";
-			file.close();
-		}
 		
 		if (!fs.open(splatmap_meta_path, file)) {
 			logError("Failed to create ", splatmap_meta_path);
@@ -3413,7 +3404,6 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		else {
 			file << "compress = false\n";
 			file << "mips = false\n";
-			file << "filter = \"point\"";
 			file.close();
 		}
 
@@ -3467,7 +3457,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		if (!fs.fileExists(mat_path)) {
 			if (fs.open(mat_path, mat_file)) {
 				mat_file << R"#(
-					shader "/pipelines/terrain.shd"
+					shader "shaders/terrain.hlsl"
 					texture ")#";
 				mat_file << file_info.basename;
 				mat_file << R"#(.raw"
@@ -3475,31 +3465,21 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 					texture "normal_detail.ltc"
 					texture "splatmap.tga"
 					texture ")#" << file_info.basename << R"#(.tga"
-					uniform("Detail distance", 50.000000)
-					uniform("Detail scale", 1.000000)
-					uniform("Noise UV scale", 0.200000)
-					uniform("Detail diffusion", 0.500000)
-					uniform("Detail power", 16.000000)
+					uniform "Detail distance", 50.000000
+					uniform "Detail scale", 1.000000
+					uniform "Noise UV scale", 0.200000
+					uniform "Detail diffusion", 0.500000
+					uniform "Detail power", 16.000000
 				)#";
 
 				mat_file.close();
 			}
 		}
 
-		StaticString<MAX_PATH> raw_meta_path(file_info.dir, "/", file_info.basename, ".raw.meta");
-		os::OutputFile raw_meta_file;
-		if (fs.open(raw_meta_path, raw_meta_file)) {
-			raw_meta_file << "wrap_mode_u = \"clamp\"\n";
-			raw_meta_file << "wrap_mode_v = \"clamp\"\n";
-			raw_meta_file.close();
-		}
-
 		StaticString<MAX_PATH> tga_meta_path(file_info.dir, "/", file_info.basename, ".tga.meta");
 		os::OutputFile tga_meta_file;
 		if (fs.open(tga_meta_path, tga_meta_file)) {
 			tga_meta_file << "srgb = true\n";
-			tga_meta_file << "wrap_mode_u = \"clamp\"\n";
-			tga_meta_file << "wrap_mode_v = \"clamp\"\n";
 			tga_meta_file.close();
 		}
 	}
