@@ -924,7 +924,7 @@ struct OSMNodeEditor : NodeEditor {
 			u8 vn = u8(clamp(-df->m_field[i], 0.f, 255.f));
 			tmp[i] = Color(vn, vp, 0, 0xff).abgr();
 		}
-		m_preview_texture = ri->createTexture("maps_debug", tmp.begin(), df->m_size, df->m_size);
+		m_preview_texture = ri->createTexture("maps_debug", tmp.begin(), df->m_size, df->m_size, gpu::TextureFormat::RGBA8);
 		m_preview_size = df->m_size;
 		m_show_preview = true;
 	}	
@@ -938,7 +938,7 @@ struct OSMNodeEditor : NodeEditor {
 			u32 v = mask->m_bitmap[i] > 0 ? 0xff : 0;
 			tmp[i] = Color(v, v, v, 0xff).abgr();
 		}
-		m_preview_texture = ri->createTexture("maps_debug", tmp.begin(), mask->m_size, mask->m_size);
+		m_preview_texture = ri->createTexture("maps_debug", tmp.begin(), mask->m_size, mask->m_size, gpu::TextureFormat::RGBA8);
 		m_preview_size = mask->m_size;
 		m_show_preview = true;
 	}
@@ -3497,7 +3497,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 				TileData& tile = task->tile;
 				const u8* data = task->is_heightmap ? (u8*)tile.hm_data.begin() : (u8*)tile.imagery_data.begin();
 				ImTextureID& tex = task->is_heightmap ? tile.hm : tile.imagery;
-				tex = ri->createTexture("maps", data, TILE_SIZE, TILE_SIZE);
+				tex = ri->createTexture("maps", data, TILE_SIZE, TILE_SIZE, gpu::TextureFormat::RGBA8);
 				ASSERT(tex != (void*)(intptr_t)0xffFFffFF);
 
 				task->destroy();
