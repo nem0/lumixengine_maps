@@ -1203,7 +1203,7 @@ struct OSMNodeEditor : NodeEditor {
 	Array<Node*> m_nodes;
 	u32 m_node_id_genereator = 1;
 	Array<String> m_recent_paths;
-	Action m_run_action{"Run", "OSM editor - run", "maps_nodes_run", ICON_FA_PLAY};
+	Action m_run_action{"Maps", "Run", "OSM editor - run", "maps_nodes_run", ICON_FA_PLAY};
 	i32 m_area_edge = 0;
 	bool m_show_save_as = false;
 	bool m_show_open = false;
@@ -3887,7 +3887,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	IVec2 m_drag_start_offset;
 	bool m_is_dragging = false;
 	bool m_show_save_raw = false;
-	Action m_toggle_ui{"Maps", "Maps - toggle ui", "maps_toggle_ui", nullptr, Action::WINDOW};
+	Action m_toggle_ui{"Maps", "Maps", "Toggle ui", "maps_toggle_ui", nullptr, Action::WINDOW};
 	Vec2 m_last_saved_hm_range = Vec2(0, 1000);
 	OSMNodeEditor m_osm_editor;
 };
