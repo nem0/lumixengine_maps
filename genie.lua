@@ -1,5 +1,4 @@
-project "maps"
-	libType()
+if plugin "maps" then
 	files { 
 		"src/**.c",
 		"src/**.cpp",
@@ -7,10 +6,8 @@ project "maps"
 		"genie.lua"
 	}
 	defines { "BUILDING_MAPS" }
-	links { "engine", "core", "renderer" }
+	dynamic_link_plugin { "engine", "core", "renderer" }
 	if build_studio then
-		links { "editor" }
+		dynamic_link_plugin { "editor" }
 	end
-	defaultConfigurations()
-
-linkPlugin("maps")
+end
