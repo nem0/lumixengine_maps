@@ -3565,8 +3565,8 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 		ImGuiEx::Label("Power");
 		ImGui::SliderFloat("##pwr", &power, 0.f, 1.f);
 		WorldEditor& editor = m_app.getWorldEditor();
-		const Array<EntityRef>& entities = editor.getSelectedEntities();
-		if (entities.empty()) {
+		Span<const EntityRef> entities = editor.getSelectedEntities();
+		if (entities.size() == 0) {
 			ImGui::TextUnformatted("No entity selected");
 			return;
 		}
@@ -3712,7 +3712,7 @@ struct MapsPlugin final : public StudioApp::GUIPlugin
 	Terrain* getSelectedTerrain() const {
 		WorldEditor& editor = m_app.getWorldEditor();
 		World* world = m_app.getWorldEditor().getWorld();
-		const Array<EntityRef>& selected_entities = editor.getSelectedEntities();
+		Span<const EntityRef> selected_entities = editor.getSelectedEntities();
 		
 		if (selected_entities.size() != 1) return nullptr;
 		if (!world->hasComponent(selected_entities[0], TERRAIN_TYPE)) return nullptr;
